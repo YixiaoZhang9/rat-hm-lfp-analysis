@@ -11,11 +11,11 @@ importlib.reload(fstore)
 
 # ---- Set base paths, date lists, and constants for data processing ----
 
-dir_base = get_path("data5_root")
+dir_base = get_path("R1_8_Raw_root")
 dir_R5_8_Data = os.path.join(
     dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_OpenEphysRecordings_R5-8/"
 )
-dir_results_base = get_path("gl14_root")
+dir_results_base = get_path("R1_8_root")
 dir_R5_8_results = os.path.join(
     dir_results_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/"
 )

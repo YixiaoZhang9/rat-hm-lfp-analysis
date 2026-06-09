@@ -1,22 +1,22 @@
 {
   "buildup_r1_4": {
     "rats": [1, 2, 3, 4],
-    "root_key": "gl14_root",
+    "root_key": "R1_8_root",
     "relative_root": "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4"
   },
   "buildup_r5_8": {
     "rats": [5, 6, 7, 8],
-    "root_key": "gl14_root",
+    "root_key": "R1_8_root",
     "relative_root": "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8"
   },
   "update_r9_12": {
     "rats": [9, 10, 11, 12],
-    "root_key": "data4_root",
+    "root_key": "R9_16_root",
     "relative_root": "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12"
   },
   "update_r13_16": {
     "rats": [13, 14, 15, 16],
-    "root_key": "data4_root",
+    "root_key": "R9_16_root",
     "relative_root": "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16"
   }
 }

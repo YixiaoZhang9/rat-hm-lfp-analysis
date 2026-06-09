@@ -26,7 +26,7 @@ from signal_viewer import SpindleViewer
 from modules.threshold_ripple_detection import filter_lfp
 
 # Paths
-dir_base1 = get_path("data4_root")
+dir_base1 = get_path("R9_16_root")
 
 dir_data_root = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/"

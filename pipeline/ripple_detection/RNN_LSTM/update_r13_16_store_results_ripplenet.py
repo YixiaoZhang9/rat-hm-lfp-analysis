@@ -208,7 +208,7 @@ def get_binary_predictions(y_prob, threshold, min_distance, min_width):
     return y_binary, np.asarray(detected_peaks)
 
 
-dir_base1 = get_path("data4_root")
+dir_base1 = get_path("R9_16_root")
 dir_R13_16_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData"
 )

@@ -51,9 +51,9 @@ Then edit `config.yaml`:
 
 ```yaml
 paths:
-  gl14_root: /path/to/GL14_RAT_FA
-  data4_root: /path/to/Data4
-  data5_root: /path/to/Data5
+  R1_8_root: /path/to/GL14_RAT_FA
+  R9_16_root: /path/to/Data4
+  R1_8_Raw_root: /path/to/Data5
   ripple_marking_root: /path/to/Ripple_Marking
   ripple_training_data: /path/to/training_data
 ```
