@@ -1,15 +1,15 @@
 paths:
   # Project root containing Rat_HM_Ephys_TD_Analysis_R1_8 for R1-4 and R5-8.
-  R1_8_root: /media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD
+  R1_8_root: /path/to/Rat_HM_Ephys_TD
 
   # Project root containing Rat_HM_Ephys_TD_Analysis_R9_16 for R9-12 and R13-16.
-  R9_16_root: /media/yixiao/Data4/Rat_HM_Ephys_TD
+  R9_16_root: /path/to/Rat_HM_Ephys_TD
 
   # Project root used by raw OpenEphys and sleep-scoring input scripts.
-  R1_8_Raw_root: /media/yixiao/Data5/Rat_HM_Ephys_TD
+  R1_8_Raw_root: /path/to/Rat_HM_Ephys_TD
 
   # Root folder for manual ripple-marking files.
-  ripple_marking_root: /mnt/genzel/Rat/HM/Rat_HM_Ephys_TD/Rat_HM_Ripple_Detection/Ripple_Marking
+  ripple_marking_root: /path/to/Rat_HM_Ripple_Detection/Ripple_Marking
 
   # Local training-data folder used when preparing ripple model training data.
-  ripple_training_data: /home/yixiao/PycharmProjects/Rat_HM/pipeline/ripple_detection/training_data
+  ripple_training_data: /path/to/ripple_detection/training_data
