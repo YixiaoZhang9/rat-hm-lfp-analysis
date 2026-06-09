@@ -10,11 +10,11 @@ from modules.project_config import get_path
 importlib.reload(fstore)
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base = get_path("RAT_HM_DATA4_ROOT")
+dir_base = get_path("data4_root")
 dir_R13_16_Data = os.path.join(
     dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_OpenEphysRecordings_R13-16/"
 )
-dir_results_base = get_path("RAT_HM_DATA4_ROOT")
+dir_results_base = get_path("data4_root")
 dir_R13_16_results = os.path.join(
     dir_results_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/"
 )

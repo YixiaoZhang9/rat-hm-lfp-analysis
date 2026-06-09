@@ -1,6 +1,0 @@
-{
-  "RAT_HM_GL14_ROOT": "/path/to/GL14_RAT_FA/",
-  "RAT_HM_DATA4_ROOT": "/path/to/Data4/",
-  "RAT_HM_RIPPLE_MARKING_ROOT": "/path/to/Ripple_Marking",
-  "RAT_HM_RIPPLE_TRAINING_DATA": "/path/to/Rat_HM/pipeline/ripple_detection/training_data"
-}

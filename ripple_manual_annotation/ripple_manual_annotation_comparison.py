@@ -31,7 +31,7 @@ def filter_nrem(starts, ends):
 
 
 # set the root path
-root = get_path("RAT_HM_RIPPLE_MARKING_ROOT")
+root = get_path("ripple_marking_root")
 
 annotators = ["Anumita", "Kjell", "Lisa", "Sachuriga", "Yixiao"]
 main_annotator = "Yixiao"

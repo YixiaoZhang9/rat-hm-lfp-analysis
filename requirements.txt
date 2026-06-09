@@ -9,6 +9,7 @@ openpyxl
 pandas==1.1.5
 PyQt5==5.15.10
 pyqtgraph
+PyYAML
 PyWavelets
 ruff==0.15.16
 scikit-image

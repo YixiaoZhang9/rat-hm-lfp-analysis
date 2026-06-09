@@ -16,7 +16,7 @@ corresponding recording before saving the results.
 """
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = get_path("RAT_HM_DATA4_ROOT")
+dir_base1 = get_path("data4_root")
 
 dir_R13_16_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Preprec_withartifacts"

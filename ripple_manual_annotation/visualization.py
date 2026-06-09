@@ -12,7 +12,7 @@ from modules.project_config import get_path
 # -------------------------------
 # Config
 # -------------------------------
-root = get_path("RAT_HM_RIPPLE_MARKING_ROOT")
+root = get_path("ripple_marking_root")
 annotators = ["Anumita", "Kjell", "Lisa", "Sachuriga", "Yixiao"]
 main_annotator = "Yixiao"
 other_annotators = [a for a in annotators if a != main_annotator]

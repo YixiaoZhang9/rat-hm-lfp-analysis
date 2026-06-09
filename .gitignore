@@ -13,6 +13,7 @@ __pycache__/
 *.py[cod]
 
 # Local analysis outputs and large data artifacts
+config.yaml
 training_data/
 trained_networks/
 *.npz

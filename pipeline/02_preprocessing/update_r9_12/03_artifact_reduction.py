@@ -26,7 +26,7 @@ This script performs the following preprocessing steps on the dataset:
 """
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = get_path("RAT_HM_DATA4_ROOT")
+dir_base1 = get_path("data4_root")
 dir_R9_12_filteredData = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Preprec_withartifacts"
 )

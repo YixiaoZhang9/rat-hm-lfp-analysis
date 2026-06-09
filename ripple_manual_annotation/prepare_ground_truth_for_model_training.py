@@ -17,7 +17,7 @@ from modules.project_config import get_path
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = get_path("RAT_HM_GL14_ROOT")
+dir_base1 = get_path("gl14_root")
 dir_R1_4_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData/HPC"
 )
@@ -38,7 +38,7 @@ dir_R5_8_Ripple = os.path.join(
     dir_base1,
     "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Ripple_detection_results",
 )
-dir_base2 = get_path("RAT_HM_DATA4_ROOT")
+dir_base2 = get_path("data4_root")
 dir_R9_12_Data = os.path.join(
     dir_base2, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData/HPC"
 )
@@ -51,7 +51,7 @@ dir_R9_12_Ripple = os.path.join(
 
 
 # the path storing the ripple marking results
-root_annotation = get_path("RAT_HM_RIPPLE_MARKING_ROOT")
+root_annotation = get_path("ripple_marking_root")
 annotator = ["Lisa", "Yixiao"]
 
 rats = [3, 7, 12]
@@ -192,7 +192,7 @@ for rat in rats:
         consensus = gaussian_filter1d(consensus, sigma=5)
 
         # save the data
-        save_root = get_path("RAT_HM_RIPPLE_TRAINING_DATA")
+        save_root = get_path("ripple_training_data")
         os.makedirs(save_root, exist_ok=True)
 
         preprocessed_data = preprocessed_data.astype(np.float32)

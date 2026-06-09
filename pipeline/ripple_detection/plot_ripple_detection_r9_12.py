@@ -15,7 +15,7 @@ from signal_viewer import RippleViewer
 from modules.project_config import get_path
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = get_path("RAT_HM_DATA4_ROOT")
+dir_base1 = get_path("data4_root")
 dir_data_root = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12"
 )

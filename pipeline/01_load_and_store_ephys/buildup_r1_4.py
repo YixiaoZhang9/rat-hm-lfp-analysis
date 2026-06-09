@@ -12,11 +12,11 @@ from modules.project_config import get_path
 importlib.reload(fstore)
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base = "/media/yixiao/Data5/"
+dir_base = get_path("data5_root")
 dir_R1_4_Data = os.path.join(
     dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_OpenEphysRecordings_R1-4/"
 )
-dir_results_base = get_path("RAT_HM_GL14_ROOT")
+dir_results_base = get_path("gl14_root")
 dir_R1_4_results = os.path.join(
     dir_results_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/"
 )

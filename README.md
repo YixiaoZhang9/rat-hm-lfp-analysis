@@ -39,18 +39,29 @@ checkpoints and training data are intentionally not tracked in Git.
 
 ## Local Data Paths
 
-The original scripts used absolute paths such as `/media/yixiao/...`. Those
-defaults are preserved for backward compatibility, but collaborators can
-override them with environment variables:
+The project reads local data roots from `config.yaml` using `pathlib.Path`.
+`config.yaml` is required for data workflows and is ignored by Git so every
+collaborator can keep their own local paths without publishing
+machine-specific locations.
 
 ```bash
-export RAT_HM_GL14_ROOT=/path/to/Rat_HM_Ephys_TD_Analysis_New_root
-export RAT_HM_DATA4_ROOT=/path/to/Rat_HM_Ephys_TD_Analysis_root
-export RAT_HM_RIPPLE_MARKING_ROOT=/path/to/Ripple_Marking
-export RAT_HM_RIPPLE_TRAINING_DATA=/path/to/training_data
+cp config.example.yaml config.yaml
 ```
 
-See `configs/local_paths.example.json` for the expected path keys.
+Then edit `config.yaml`:
+
+```yaml
+paths:
+  gl14_root: /path/to/GL14_RAT_FA
+  data4_root: /path/to/Data4
+  data5_root: /path/to/Data5
+  ripple_marking_root: /path/to/Ripple_Marking
+  ripple_training_data: /path/to/training_data
+```
+
+The scripts use `modules.project_config.get_path(...)`, which returns
+`pathlib.Path` objects. Historical local paths are shown only in
+`config.example.yaml`; they are not hard-coded into workflow scripts.
 
 ## Running Existing Workflows
 
@@ -84,9 +95,9 @@ Ignored artifact types include:
 Formatting and import cleanup are configured in `pyproject.toml`:
 
 ```bash
-python -m ruff format modules pipeline ripple_manual_annotation scripts
-python -m ruff check modules pipeline ripple_manual_annotation scripts
-python -m compileall -q modules pipeline ripple_manual_annotation scripts
+python -m ruff format modules pipeline ripple_manual_annotation archive scripts
+python -m ruff check modules pipeline ripple_manual_annotation archive scripts
+python -m compileall -q modules pipeline ripple_manual_annotation archive scripts
 ```
 
 Before opening a pull request, run the checks above and confirm that no private
