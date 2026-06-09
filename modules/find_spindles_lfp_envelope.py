@@ -1,8 +1,9 @@
 import numpy as np
-from scipy.signal import hilbert,get_window
-from scipy.stats import zscore
 from scipy.ndimage import gaussian_filter1d
+from scipy.signal import get_window, hilbert
+
 from modules.lfp_artifact_MAD_detection import mad_artifact_detector
+
 
 def intervals_to_mask(intervals, timestamps):
     mask = np.zeros_like(timestamps, dtype=bool)
@@ -10,7 +11,8 @@ def intervals_to_mask(intervals, timestamps):
         mask |= (timestamps >= start) & (timestamps <= end)
     return mask
 
-def compute_peak_mean_frequency(segment, fs, window_type='hamming',freq_band=(9, 20)):
+
+def compute_peak_mean_frequency(segment, fs, window_type="hamming", freq_band=(9, 20)):
     """
     Compute the spectral centroid of a short signal segment.
 
@@ -73,7 +75,15 @@ def compute_peak_mean_frequency(segment, fs, window_type='hamming',freq_band=(9,
     return peak_freq, mean_freq
 
 
-def find_spindles_lfp_envelope(raw_signal, signal, fs, threshold=2.5, minpeak=5, durations=(0.4, 3.5), min_distance=0.5):
+def find_spindles_lfp_envelope(
+    raw_signal,
+    signal,
+    fs,
+    threshold=2.5,
+    minpeak=5,
+    durations=(0.4, 3.5),
+    min_distance=0.5,
+):
     """
     Detect thalamo-cortical sleep spindles from spindle-band filtered LFP
     using a Hilbert-envelope thresholding approach with artifact rejection.
@@ -144,11 +154,15 @@ def find_spindles_lfp_envelope(raw_signal, signal, fs, threshold=2.5, minpeak=5,
     """
 
     # Detect LFP artifacts using the median absolute deviation method
-    (valid_times, artifact_intervals_s) = mad_artifact_detector(raw_signal, mad_thresh = 6.0, proportion_above_thresh = 0.1,
-                                                                removal_window_ms = 100.0,sampling_frequency = fs)
+    (valid_times, artifact_intervals_s) = mad_artifact_detector(
+        raw_signal,
+        mad_thresh=6.0,
+        proportion_above_thresh=0.1,
+        removal_window_ms=100.0,
+        sampling_frequency=fs,
+    )
     t = np.arange(len(signal)) / fs
     valid_mask = intervals_to_mask(valid_times, t)
-
 
     # Constants
     minBoutDuration = 0.050
@@ -238,15 +252,13 @@ def find_spindles_lfp_envelope(raw_signal, signal, fs, threshold=2.5, minpeak=5,
     peak_idx_spindle = peak_idx_spindle[idx_keep]
     peak_val_spindle = peak_val_spindle[idx_keep]
 
-
-   # Spindle start may be inaccurate due to leading delta wave, we need to correct for this
-   # 1) Update threshold to 1/3 peak (if this is higher than previous threshold)
-   # 2) Select spindles that need correction
-   # 3) Find last threshold crossing before peak (vectorized code)
+    # Spindle start may be inaccurate due to leading delta wave, we need to correct for this
+    # 1) Update threshold to 1/3 peak (if this is higher than previous threshold)
+    # 2) Select spindles that need correction
+    # 3) Find last threshold crossing before peak (vectorized code)
     new_threshold = peak_val_spindle / 3
 
     for i in range(len(start_idx_spindle)):
-
         if new_threshold[i] <= threshold:
             continue
 
@@ -278,7 +290,6 @@ def find_spindles_lfp_envelope(raw_signal, signal, fs, threshold=2.5, minpeak=5,
     n = len(signal)
 
     for start, end, peak in zip(start_idx_spindle, end_idx_spindle, peak_idx_spindle):
-
         # bounds safe
         s_buf = max(0, start - buffer)
         e_buf = min(n, end + buffer)
@@ -299,7 +310,6 @@ def find_spindles_lfp_envelope(raw_signal, signal, fs, threshold=2.5, minpeak=5,
         clean_stop.append(end)
         clean_peak.append(peak)
 
-
     start_idx_spindle = np.array(clean_start)
     end_idx_spindle = np.array(clean_stop)
     peak_idx_spindle = np.array(clean_peak)
@@ -311,26 +321,35 @@ def find_spindles_lfp_envelope(raw_signal, signal, fs, threshold=2.5, minpeak=5,
     mean_frequency_spindle = []
 
     for start, end, peak in zip(start_idx_spindle, end_idx_spindle, peak_idx_spindle):
-
         # Duration / s
         duration = (end - start) / fs
         duration_spindle.append(duration)
 
         # Amplitude: raw Hilbert envelope peak
-        envelope_segment = envelope[start:end + 1]
+        envelope_segment = envelope[start : end + 1]
         amplitude = np.max(envelope_segment)
         amplitude_spindle.append(amplitude)
 
         # Frequency: filtered spindle segment
-        signal_segment = signal[start:end + 1]
-        peak_freq, mean_freq = compute_peak_mean_frequency(signal_segment, fs,freq_band=(9, 20))
+        signal_segment = signal[start : end + 1]
+        peak_freq, mean_freq = compute_peak_mean_frequency(
+            signal_segment, fs, freq_band=(9, 20)
+        )
 
         peak_frequency_spindle.append(peak_freq)
         mean_frequency_spindle.append(mean_freq)
 
-
     # Output
-    spindles = np.column_stack((start_idx_spindle, peak_idx_spindle, end_idx_spindle,
-                                duration_spindle,amplitude_spindle,peak_frequency_spindle, mean_frequency_spindle))
+    spindles = np.column_stack(
+        (
+            start_idx_spindle,
+            peak_idx_spindle,
+            end_idx_spindle,
+            duration_spindle,
+            amplitude_spindle,
+            peak_frequency_spindle,
+            mean_frequency_spindle,
+        )
+    )
 
     return spindles

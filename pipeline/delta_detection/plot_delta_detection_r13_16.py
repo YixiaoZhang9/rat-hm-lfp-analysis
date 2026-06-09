@@ -1,35 +1,41 @@
 # ---- Import ----
-import re
 import os
-import numpy as np
-from scipy.io import loadmat
-import matplotlib.pyplot as plt
-from modules.threshold_ripple_detection import find_ripples_karlsson, find_bouts, filter_lfp
+import re
 import sys
-from modules.ephys_signal_scoring_view import SignalPlotViewer
-from scipy.signal import hilbert
-import pandas as pd
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
 from PyQt5.QtWidgets import QApplication, QFileDialog
+from scipy.io import loadmat
 from signal_viewer import DeltaViewer
 
-
+from modules.threshold_ripple_detection import (
+    filter_lfp,
+)
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = '/media/yixiao/Data4/'
-dir_R13_16_Data = os.path.join(dir_base1, 'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData')
-dir_R13_16_Scoring = os.path.join(dir_base1, 'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Scoring')
-dir_R13_16_Delta = os.path.join(dir_base1, 'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Delta_detection_results')
+dir_base1 = "/media/yixiao/Data4/"
+dir_R13_16_Data = os.path.join(
+    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData"
+)
+dir_R13_16_Scoring = os.path.join(
+    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Scoring"
+)
+dir_R13_16_Delta = os.path.join(
+    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Delta_detection_results"
+)
 
-rats = np.arange(13,17)
-regions = ['HPC','PL','RSC']
-sleep_periods = ['presleep','postsleep']
-fs = 1000 # downsampled sample frequency
+rats = np.arange(13, 17)
+regions = ["HPC", "PL", "RSC"]
+sleep_periods = ["presleep", "postsleep"]
+fs = 1000  # downsampled sample frequency
 
-#-----------------------------------------------------------------------------------
-#------------------------------plot the delta rate per day per rat-----------------
+# -----------------------------------------------------------------------------------
+# ------------------------------plot the delta rate per day per rat-----------------
 
-#%%
+
+# %%
 # Compute delta rate (deltas / min in NREM)
 def compute_delta_rate(csv_path, scoring):
 
@@ -62,20 +68,20 @@ def compute_delta_rate(csv_path, scoring):
 results = []
 
 for rat in rats:
-    rat_str = f'rat{rat}'
+    rat_str = f"rat{rat}"
 
-    for region in ['RSC']:
+    for region in ["RSC"]:
         dir_data = os.path.join(dir_R13_16_Data, region, str(rat))
 
         if not os.path.exists(dir_data):
             continue
 
         for studyday in os.listdir(dir_data):
-
             for sleep_period in sleep_periods:
-
                 dir_trial = os.path.join(dir_data, studyday, sleep_period)
-                dir_delta = os.path.join(dir_R13_16_Delta, region, str(rat), studyday, sleep_period)
+                dir_delta = os.path.join(
+                    dir_R13_16_Delta, region, str(rat), studyday, sleep_period
+                )
 
                 # find all trial files
                 matched_files = []
@@ -85,49 +91,57 @@ for rat in rats:
                             matched_files.append(os.path.join(root, name))
 
                 # load sleep scoring files
-                dir_scoring = os.path.join(dir_R13_16_Scoring, str(rat), str(studyday), sleep_period)
+                dir_scoring = os.path.join(
+                    dir_R13_16_Scoring, str(rat), str(studyday), sleep_period
+                )
 
                 if not os.path.exists(dir_scoring):
                     print(f"Missing scoring: {dir_scoring}")
                     continue
 
-                scoring_files = [f for f in os.listdir(dir_scoring) if f.endswith(".mat")]
+                scoring_files = [
+                    f for f in os.listdir(dir_scoring) if f.endswith(".mat")
+                ]
 
                 # process each trial
                 for trial_name in matched_files:
-
                     # matched sleep scoring files
                     if len(scoring_files) == 1:
-                        scoring = loadmat(os.path.join(dir_scoring, scoring_files[0]))['states'].squeeze()
+                        scoring = loadmat(os.path.join(dir_scoring, scoring_files[0]))[
+                            "states"
+                        ].squeeze()
                     else:
-                        match = re.search(r'_(\d+)\.mat$', trial_name)
+                        match = re.search(r"_(\d+)\.mat$", trial_name)
                         if not match:
                             print("No matching scoring file")
                             continue
 
                         suffix = match.group(1).zfill(2)
-                        pattern = re.compile(rf'_{suffix}_')
+                        pattern = re.compile(rf"_{suffix}_")
 
                         scoring = None
                         for f in scoring_files:
                             if pattern.search(f):
-                                scoring = loadmat(os.path.join(dir_scoring, f))['states'].squeeze()
+                                scoring = loadmat(os.path.join(dir_scoring, f))[
+                                    "states"
+                                ].squeeze()
                                 break
 
                     trial_id = Path(trial_name).stem
                     # --- CSV paths ---
                     csv_threshold = os.path.join(dir_delta, f"{trial_id}_deltas.csv")
 
-
                     rate_th = compute_delta_rate(csv_threshold, scoring)
 
-                    results.append({
-                        "rat": rat_str,
-                        "day": studyday,
-                        "sleep": sleep_period,
-                        "trial": trial_id,
-                        "threshold": rate_th,
-                    })
+                    results.append(
+                        {
+                            "rat": rat_str,
+                            "day": studyday,
+                            "sleep": sleep_period,
+                            "trial": trial_id,
+                            "threshold": rate_th,
+                        }
+                    )
 
 
 df = pd.DataFrame(results)
@@ -166,6 +180,7 @@ app = QApplication.instance()
 if app is None:
     app = QApplication(sys.argv)
 
+
 ##----------------------------------------------------------------------
 ##--------------------------plot the signal-----------------------------
 def load_events(csv_path):
@@ -178,7 +193,7 @@ file_path, _ = QFileDialog.getOpenFileName(
     None,
     "Select trial .mat file",
     dir_R13_16_Data,  # starting directory
-    "MAT files (*.mat)"
+    "MAT files (*.mat)",
 )
 
 if not file_path:
@@ -204,19 +219,19 @@ dir_scoring = os.path.join(dir_R13_16_Scoring, rat, studyday, sleep_period)
 scoring_files = [f for f in os.listdir(dir_scoring) if f.endswith(".mat")]
 # matched sleep scoring files
 if len(scoring_files) == 1:
-    scoring = loadmat(os.path.join(dir_scoring, scoring_files[0]))['states'].squeeze()
+    scoring = loadmat(os.path.join(dir_scoring, scoring_files[0]))["states"].squeeze()
 else:
-    match = re.search(r'_(\d+)$', trial_id)
+    match = re.search(r"_(\d+)$", trial_id)
     if not match:
         print("No matching scoring file")
 
     suffix = match.group(1).zfill(2)
-    pattern = re.compile(rf'_{suffix}_')
+    pattern = re.compile(rf"_{suffix}_")
 
     scoring = None
     for f in scoring_files:
         if pattern.search(f):
-            scoring = loadmat(os.path.join(dir_scoring, f))['states'].squeeze()
+            scoring = loadmat(os.path.join(dir_scoring, f))["states"].squeeze()
             break
 
 # ---- Find ripple CSVs ----
@@ -225,8 +240,8 @@ csv_threshold = os.path.join(dir_delta, f"{trial_id}_deltas.csv")
 
 threshold_events = load_events(csv_threshold) if os.path.exists(csv_threshold) else []
 
-lfp=loadmat(trial_path)["data"].squeeze()
-filtered_lfp = filter_lfp(lfp,fs,[0.3,30])
+lfp = loadmat(trial_path)["data"].squeeze()
+filtered_lfp = filter_lfp(lfp, fs, [0.3, 30])
 
 # ---- Launch viewer ----
 
@@ -239,12 +254,6 @@ event_sets = {
     "Threshold": threshold_events,
 }
 
-viewer = DeltaViewer(
-    lfp=filtered_lfp,
-    scoring=scoring,
-    fs=fs,
-    event_sets=event_sets
-)
+viewer = DeltaViewer(lfp=filtered_lfp, scoring=scoring, fs=fs, event_sets=event_sets)
 viewer.show()
 sys.exit(app.exec_())
-

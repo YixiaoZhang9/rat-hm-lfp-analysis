@@ -1,15 +1,18 @@
+import matplotlib.pyplot as plt
 import numpy as np
-from scipy.signal import iirnotch,butter, filtfilt, hilbert,convolve, get_window
+import seaborn as sns
+from scipy.signal import butter, convolve, filtfilt, get_window, hilbert
 from scipy.signal.windows import gaussian
 from scipy.stats import zscore
-import matplotlib.pyplot as plt
-import seaborn as sns
+
 from modules.lfp_artifact_MAD_detection import mad_artifact_detector
 
-def filter_lfp(lfp, fs,freq_range):
+
+def filter_lfp(lfp, fs, freq_range):
     # Bandpass filter
-    b, a = butter(4, np.array(freq_range)/(fs/2), btype='band')
+    b, a = butter(4, np.array(freq_range) / (fs / 2), btype="band")
     return filtfilt(b, a, lfp)
+
 
 def smooth_signal(signal, fs, sigma):
     """Smooth the signal using a Gaussian filter."""
@@ -27,11 +30,12 @@ def smooth_signal(signal, fs, sigma):
     # Normalize the Gaussian filter
     gauss_filter = gauss_filter / sum(gauss_filter)
     # Apply the filter using convolution
-    smoothed_lfp = convolve(signal, gauss_filter, 'same')
+    smoothed_lfp = convolve(signal, gauss_filter, "same")
     return smoothed_lfp
 
+
 def merge_close_ripples(start_indices, end_indices, fs, close_thresh):
-    """ Merge ripples that are close to each other.
+    """Merge ripples that are close to each other.
     parameters
     -starts : list of int Start indices of candidate ripples.
     -ends : list of int End indices of candidate ripples.
@@ -57,7 +61,6 @@ def merge_close_ripples(start_indices, end_indices, fs, close_thresh):
     return start_indices.tolist(), end_indices.tolist()
 
 
-
 def fastrms(signal, window_size=5, dim=0, apply_amplitude_correction=False):
     """
     Calculate the instantaneous root-mean-square (RMS) of a signal.
@@ -76,15 +79,20 @@ def fastrms(signal, window_size=5, dim=0, apply_amplitude_correction=False):
     if window_size <= 0:
         raise ValueError("Window size must be a positive integer.")
     # Create rectangular window
-    window = get_window('boxcar', window_size)
+    window = get_window("boxcar", window_size)
     # Calculate power
-    power = signal ** 2
+    power = signal**2
 
     # Convolve to get RMS
     if signal.ndim == 1:
-        rms = convolve(power, window, mode='same')
+        rms = convolve(power, window, mode="same")
     else:  # 2D case
-        rms = np.array([convolve(power[:, col], window, mode='same') for col in range(signal.shape[1])]).T
+        rms = np.array(
+            [
+                convolve(power[:, col], window, mode="same")
+                for col in range(signal.shape[1])
+            ]
+        ).T
 
     # Normalize and compute RMS
     rms = np.sqrt(rms / np.sum(window))
@@ -95,8 +103,16 @@ def fastrms(signal, window_size=5, dim=0, apply_amplitude_correction=False):
     return rms
 
 
-def find_ripples_karlsson(lfp, fs, min_duration=0.015, zscore_thresh=3, smoothing_sigma=0.004,f_plot = 0,threshold=None):
-    '''
+def find_ripples_karlsson(
+    lfp,
+    fs,
+    min_duration=0.015,
+    zscore_thresh=3,
+    smoothing_sigma=0.004,
+    f_plot=0,
+    threshold=None,
+):
+    """
     ----------------------------------------------------------------------------------------------
          reference:
      [1] Karlsson, M.P., and Frank, L.M. (2009). Awake replay of remote experiences in the hippocampus.
@@ -110,7 +126,7 @@ def find_ripples_karlsson(lfp, fs, min_duration=0.015, zscore_thresh=3, smoothin
     threshold: optional
         Envelop threhosld for ripple detection.if none, it will be set to `zscore_threshold`.
 
-     '''
+    """
     filtered_lfp = filter_lfp(lfp, fs, [100, 250])
     instantaneous_amplitude = np.abs(hilbert(filtered_lfp))
     smoothed_envelope = smooth_signal(instantaneous_amplitude, fs, smoothing_sigma)
@@ -118,17 +134,29 @@ def find_ripples_karlsson(lfp, fs, min_duration=0.015, zscore_thresh=3, smoothin
     zscored_envelope = zscore(smoothed_envelope)
     above_mean = zscored_envelope > 0
     if threshold is not None:
-        zscore_thresh_new = (threshold - np.mean(smoothed_envelope))/np.std(smoothed_envelope)
+        zscore_thresh_new = (threshold - np.mean(smoothed_envelope)) / np.std(
+            smoothed_envelope
+        )
     else:
         zscore_thresh_new = zscore_thresh
     above_thresh = zscored_envelope > zscore_thresh_new
 
-    thresh_envelope = zscore_thresh_new * np.std(smoothed_envelope) + np.mean(smoothed_envelope)
+    thresh_envelope = zscore_thresh_new * np.std(smoothed_envelope) + np.mean(
+        smoothed_envelope
+    )
 
-    start_idx_mean = np.where(np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1)[0]
-    end_idx_mean = np.where(np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1)[0]
-    start_idx_threshold = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
-    end_idx_threshold = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    start_idx_mean = np.where(
+        np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1
+    )[0]
+    end_idx_mean = np.where(
+        np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1
+    )[0]
+    start_idx_threshold = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
+    end_idx_threshold = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
     # extend the threshold
     start_idx_ripple, peak_idx_ripple, end_idx_ripple = [], [], []
@@ -145,7 +173,7 @@ def find_ripples_karlsson(lfp, fs, min_duration=0.015, zscore_thresh=3, smoothin
                 start_idx_ripple.append(start_idx_mean[idx])
                 end_idx_ripple.append(end_idx_mean[idx])
                 # find the peak
-                segment = filtered_lfp[start_idx_mean[idx]:end_idx_mean[idx]]
+                segment = filtered_lfp[start_idx_mean[idx] : end_idx_mean[idx]]
                 peak_local = np.argmax(segment)
                 peak_idx_ripple.append(start_idx_mean[idx] + peak_local)
 
@@ -170,20 +198,42 @@ def find_ripples_karlsson(lfp, fs, min_duration=0.015, zscore_thresh=3, smoothin
 
         # ===============================
 
-        axs[1].plot(t, filtered_lfp, color="gray", lw=0.5, alpha=0.7, label="Filtered LFP (100–250 Hz)")
+        axs[1].plot(
+            t,
+            filtered_lfp,
+            color="gray",
+            lw=0.5,
+            alpha=0.7,
+            label="Filtered LFP (100–250 Hz)",
+        )
         axs[1].plot(t, smoothed_envelope, color="b", lw=1.2, label="Smoothed envelope")
         axs[1].axhline(thresh_envelope, color="r", ls="--", label="Envelope threshold")
 
         for s, e in zip(start_times, end_times):
             axs[1].axvspan(s, e, color="orange", alpha=0.25)
-        axs[1].scatter(peak_times, smoothed_envelope[peak_idx_ripple],
-                       color="magenta", s=30, label="Ripple peaks")
+        axs[1].scatter(
+            peak_times,
+            smoothed_envelope[peak_idx_ripple],
+            color="magenta",
+            s=30,
+            label="Ripple peaks",
+        )
 
-        axs[1].scatter(start_times, smoothed_envelope[start_idx_ripple],
-                       color="green", s=25, label="Ripple start points")
+        axs[1].scatter(
+            start_times,
+            smoothed_envelope[start_idx_ripple],
+            color="green",
+            s=25,
+            label="Ripple start points",
+        )
 
-        axs[1].scatter(end_times, smoothed_envelope[end_idx_ripple],
-                       color="pink", s=25, label="Ripple end points")
+        axs[1].scatter(
+            end_times,
+            smoothed_envelope[end_idx_ripple],
+            color="pink",
+            s=25,
+            label="Ripple end points",
+        )
 
         axs[1].set_title("Filtered LFP + Envelope + Ripple Detection")
         axs[1].set_ylabel("Amplitude")
@@ -202,8 +252,9 @@ def find_ripples_karlsson(lfp, fs, min_duration=0.015, zscore_thresh=3, smoothin
         "PeakIndex": peak_idx_ripple,
         "EndIndex": end_idx_ripple,
         "thresh_envelope": thresh_envelope,
-        "ripple_envelop" : ripple_envelopes
+        "ripple_envelop": ripple_envelopes,
     }
+
 
 def intervals_to_mask(intervals, timestamps):
     mask = np.zeros_like(timestamps, dtype=bool)
@@ -212,8 +263,10 @@ def intervals_to_mask(intervals, timestamps):
     return mask
 
 
-def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3, smoothing_sigma=0.006,f_plot = 0):
-    '''
+def find_ripples_karlsson_Adaptive(
+    lfp, fs, min_duration=0.015, zscore_thresh=3, smoothing_sigma=0.006, f_plot=0
+):
+    """
     1) detect artifacts and add artifact mask
     2) Low threshold increased from 0 -> 0.5 to reduce false positives.
 
@@ -230,11 +283,16 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
     threshold: optional
         Envelop threhosld for ripple detection.if none, it will be set to `zscore_threshold`.
 
-     '''
+    """
 
     # Detect LFP artifacts using the median absolute deviation method
-    (valid_times, artifact_intervals_s) = mad_artifact_detector(lfp, mad_thresh = 6.0, proportion_above_thresh = 0.1,
-    removal_window_ms = 100.0,sampling_frequency = fs)
+    (valid_times, artifact_intervals_s) = mad_artifact_detector(
+        lfp,
+        mad_thresh=6.0,
+        proportion_above_thresh=0.1,
+        removal_window_ms=100.0,
+        sampling_frequency=fs,
+    )
 
     # convert intervals to mask
     t = np.arange(len(lfp)) / fs
@@ -252,10 +310,18 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
     above_mean = (zscored_envelope > 0.5) & valid_mask
     above_thresh = (zscored_envelope > zscore_thresh) & valid_mask
 
-    start_idx_mean = np.where(np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1)[0]
-    end_idx_mean = np.where(np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1)[0]
-    start_idx_threshold = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
-    end_idx_threshold = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    start_idx_mean = np.where(
+        np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1
+    )[0]
+    end_idx_mean = np.where(
+        np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1
+    )[0]
+    start_idx_threshold = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
+    end_idx_threshold = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
     # extend the threshold
     start_idx_ripple, peak_idx_ripple, end_idx_ripple = [], [], []
@@ -272,7 +338,7 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
                 start_idx_ripple.append(start_idx_mean[idx])
                 end_idx_ripple.append(end_idx_mean[idx])
                 # find the peak
-                segment = filtered_lfp[start_idx_mean[idx]:end_idx_mean[idx]]
+                segment = filtered_lfp[start_idx_mean[idx] : end_idx_mean[idx]]
                 peak_local = np.argmax(segment)
                 peak_idx_ripple.append(start_idx_mean[idx] + peak_local)
 
@@ -288,13 +354,12 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
     clean_peak = []
 
     for start, end, peak in zip(start_idx_ripple, end_idx_ripple, peak_idx_ripple):
-
         # full ripple must be clean
         if not np.all(valid_mask[start:end]):
             continue
 
         # buffer zone check
-        if not np.all(valid_mask[start - buffer:end + buffer]):
+        if not np.all(valid_mask[start - buffer : end + buffer]):
             continue
 
         clean_start.append(start)
@@ -311,8 +376,12 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
 
     if f_plot:
         artifact_mask = ~valid_mask
-        artifact_start = np.where(np.diff(np.concatenate(([0], artifact_mask.astype(int)))) == 1)[0]
-        artifact_end = np.where(np.diff(np.concatenate((artifact_mask.astype(int), [0]))) == -1)[0]
+        artifact_start = np.where(
+            np.diff(np.concatenate(([0], artifact_mask.astype(int)))) == 1
+        )[0]
+        artifact_end = np.where(
+            np.diff(np.concatenate((artifact_mask.astype(int), [0]))) == -1
+        )[0]
         t = np.arange(len(lfp)) / fs
 
         fig, axs = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
@@ -324,7 +393,14 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
         axs[0].legend()
 
         # ===============================\
-        axs[1].plot(t, filtered_lfp, color="gray", lw=0.5, alpha=0.7, label="Filtered LFP (100–250 Hz)")
+        axs[1].plot(
+            t,
+            filtered_lfp,
+            color="gray",
+            lw=0.5,
+            alpha=0.7,
+            label="Filtered LFP (100–250 Hz)",
+        )
         axs[1].plot(t, smoothed_envelope, color="b", lw=1.2, label="Smoothed envelope")
         # ripple spans
         for start, end in zip(start_times, end_times):
@@ -332,17 +408,37 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
 
         # artifact spans
         for i, (start, end) in enumerate(zip(artifact_start, artifact_end)):
-            axs[1].axvspan(start / fs, end / fs, color="red", alpha=0.2,
-                           label="Artifact" if i == 0 else None)
+            axs[1].axvspan(
+                start / fs,
+                end / fs,
+                color="red",
+                alpha=0.2,
+                label="Artifact" if i == 0 else None,
+            )
 
-        axs[1].scatter(peak_times, smoothed_envelope[peak_idx_ripple],
-                       color="magenta", s=30, label="Ripple peaks")
+        axs[1].scatter(
+            peak_times,
+            smoothed_envelope[peak_idx_ripple],
+            color="magenta",
+            s=30,
+            label="Ripple peaks",
+        )
 
-        axs[1].scatter(start_times, smoothed_envelope[start_idx_ripple],
-                       color="green", s=25, label="Ripple start points")
+        axs[1].scatter(
+            start_times,
+            smoothed_envelope[start_idx_ripple],
+            color="green",
+            s=25,
+            label="Ripple start points",
+        )
 
-        axs[1].scatter(end_times, smoothed_envelope[end_idx_ripple],
-                       color="pink", s=25, label="Ripple end points")
+        axs[1].scatter(
+            end_times,
+            smoothed_envelope[end_idx_ripple],
+            color="pink",
+            s=25,
+            label="Ripple end points",
+        )
 
         axs[1].set_title("Filtered LFP + Envelope + Ripple Detection")
         axs[1].set_ylabel("Amplitude")
@@ -361,12 +457,14 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
         "StartIndex": start_idx_ripple,
         "PeakIndex": peak_idx_ripple,
         "EndIndex": end_idx_ripple,
-        "ripple_envelop" : ripple_envelopes
+        "ripple_envelop": ripple_envelopes,
     }
 
 
-def find_ripples_karlsson_modified(lfp, fs, min_duration=0.015,smoothing_sigma=0.004,f_plot = 0):
-    '''
+def find_ripples_karlsson_modified(
+    lfp, fs, min_duration=0.015, smoothing_sigma=0.004, f_plot=0
+):
+    """
     ----------------------------------------------------------------------------------------------
          reference:
      [1] Karlsson, M.P., and Frank, L.M. (2009). Awake replay of remote experiences in the hippocampus.
@@ -383,14 +481,16 @@ def find_ripples_karlsson_modified(lfp, fs, min_duration=0.015,smoothing_sigma=0
     smoothing_sigma : Amount to smooth the time series over time. The default is given assuming time is in units of seconds.
     close_ripple_threshold : Exclude ripples that occur within `close_ripple_threshold` of a previously detected ripple.
     ---------------------------------------------------------------------------------------------
-     '''
+    """
     filtered_lfp = filter_lfp(lfp, fs, [80, 250])
     instantaneous_amplitude = np.abs(hilbert(filtered_lfp))
     smoothed_envelope = smooth_signal(instantaneous_amplitude, fs, smoothing_sigma)
 
     zscored_envelope = zscore(smoothed_envelope)
     above_mean = zscored_envelope > 0
-    thresh_envelope_z = estimate_noise_mirror_threshold(zscored_envelope, percentile=0.995,plot = 0)
+    thresh_envelope_z = estimate_noise_mirror_threshold(
+        zscored_envelope, percentile=0.995, plot=0
+    )
     above_thresh = zscored_envelope > thresh_envelope_z
 
     # converting to original envelop
@@ -398,10 +498,18 @@ def find_ripples_karlsson_modified(lfp, fs, min_duration=0.015,smoothing_sigma=0
     std_env = np.std(smoothed_envelope)
     thresh_envelope = thresh_envelope_z * std_env + mean_env
 
-    start_idx_mean = np.where(np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1)[0]
-    end_idx_mean = np.where(np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1)[0]
-    start_idx_threshold = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
-    end_idx_threshold = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    start_idx_mean = np.where(
+        np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1
+    )[0]
+    end_idx_mean = np.where(
+        np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1
+    )[0]
+    start_idx_threshold = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
+    end_idx_threshold = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
     # extend the threshold
     start_idx_ripple, end_idx_ripple = [], []
@@ -417,7 +525,6 @@ def find_ripples_karlsson_modified(lfp, fs, min_duration=0.015,smoothing_sigma=0
             if (end - start) / fs > min_duration:
                 start_idx_ripple.append(start_idx_mean[idx])
                 end_idx_ripple.append(end_idx_mean[idx])
-
 
     if f_plot:
         start_times = np.unique(start_idx_ripple) / fs
@@ -443,10 +550,13 @@ def find_ripples_karlsson_modified(lfp, fs, min_duration=0.015,smoothing_sigma=0
     return {
         "StartIndex": np.unique(start_idx_ripple) / fs,
         "EndIndex": np.unique(end_idx_ripple) / fs,
-        "thresh_envelope": thresh_envelope
+        "thresh_envelope": thresh_envelope,
     }
 
-def estimate_noise_mirror_threshold(signal_envelope, bins=200, percentile=0.9999,plot = 0):
+
+def estimate_noise_mirror_threshold(
+    signal_envelope, bins=200, percentile=0.9999, plot=0
+):
     """
     Estimate an adaptive threshold for SWR detection based on the mirrored noise distribution method.
 
@@ -498,24 +608,45 @@ def estimate_noise_mirror_threshold(signal_envelope, bins=200, percentile=0.9999
 
     # 8. Optional visualization
     if plot:
-        sns.histplot(signal_envelope, bins=bins, kde=False, color='gray', label='Original distribution')
-        plt.plot(noise_bins, noise_pdf * max(hist) / max(noise_pdf), 'r-', label='Mirrored noise PDF (scaled)')
-        plt.axvline(mode_val, color='b', linestyle='--', label='Mode')
-        plt.axvline(thresh_envelope, color='r', linestyle=':', label=f'{percentile * 100:.3f}th percentile')
+        sns.histplot(
+            signal_envelope,
+            bins=bins,
+            kde=False,
+            color="gray",
+            label="Original distribution",
+        )
+        plt.plot(
+            noise_bins,
+            noise_pdf * max(hist) / max(noise_pdf),
+            "r-",
+            label="Mirrored noise PDF (scaled)",
+        )
+        plt.axvline(mode_val, color="b", linestyle="--", label="Mode")
+        plt.axvline(
+            thresh_envelope,
+            color="r",
+            linestyle=":",
+            label=f"{percentile * 100:.3f}th percentile",
+        )
         plt.legend()
-        plt.xlabel('Envelope')
-        plt.ylabel('Density')
-        plt.title('Mirrored noise distribution and adaptive threshold')
+        plt.xlabel("Envelope")
+        plt.ylabel("Density")
+        plt.title("Mirrored noise distribution and adaptive threshold")
         plt.show()
 
     return thresh_envelope
 
 
-
-
-def find_ripples_dahal(lfp, fs, min_duration=0.02, zscore_thresh=2.0, zscore_peak_thresh=5.0, smoothing_sigma=0.004,
-                       close_ripple_thresh=0.03):
-    '''
+def find_ripples_dahal(
+    lfp,
+    fs,
+    min_duration=0.02,
+    zscore_thresh=2.0,
+    zscore_peak_thresh=5.0,
+    smoothing_sigma=0.004,
+    close_ripple_thresh=0.03,
+):
+    """
     ---------------------------------------------------------------------------------------------------
     reference:
     [1] Dahal, P., Rauhala, O. J., Khodagholy, D., & Gelinas, J. N. (2023).Hippocampal–cortical coupling
@@ -528,7 +659,7 @@ def find_ripples_dahal(lfp, fs, min_duration=0.02, zscore_thresh=2.0, zscore_pea
     zscore_peak_threshold: Number of standard deviations the ripple peak power must exceed to be considered a ripple
     smoothing_sigma : Amount to smooth the time series over time. The default is given assuming time is in units of seconds.
     close_ripple_threshold : Exclude ripples that occur within `close_ripple_threshold` of a previously detected ripple.
-    '''
+    """
     filtered_lfp = filter_lfp(lfp, fs, [80, 250])
     instantaneous_amplitude = np.abs(hilbert(filtered_lfp))
     smoothed_envelope = smooth_signal(instantaneous_amplitude, fs, smoothing_sigma)
@@ -536,8 +667,12 @@ def find_ripples_dahal(lfp, fs, min_duration=0.02, zscore_thresh=2.0, zscore_pea
     zscored_envelope = zscore(smoothed_envelope)
     above_thresh = zscored_envelope > zscore_thresh
 
-    start_idx_threshold = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
-    end_idx_threshold = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    start_idx_threshold = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
+    end_idx_threshold = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
     start_idx_ripple, end_idx_ripple = [], []
 
@@ -551,16 +686,18 @@ def find_ripples_dahal(lfp, fs, min_duration=0.02, zscore_thresh=2.0, zscore_pea
             end_idx_ripple.append(end)
 
     # Merge close ripples
-    merged_starts,merged_ends = merge_close_ripples(start_idx_ripple, end_idx_ripple, fs, close_ripple_thresh)
+    merged_starts, merged_ends = merge_close_ripples(
+        start_idx_ripple, end_idx_ripple, fs, close_ripple_thresh
+    )
 
     return {
-        "StartIndex": np.array (merged_starts) / fs,
-        "EndIndex": np.array(merged_ends) / fs
+        "StartIndex": np.array(merged_starts) / fs,
+        "EndIndex": np.array(merged_ends) / fs,
     }
 
 
 def find_ripples_diba(lfp, fs, min_duration=0, zscore_thresh=2):
-    '''
+    """
     ---------------------------------------------------------------------------------------------------
     reference:
     [1] Diba, K., & Buzsáki, G. (2007). Forward and reverse hippocampal place-cell sequences during ripples.
@@ -574,26 +711,36 @@ def find_ripples_diba(lfp, fs, min_duration=0, zscore_thresh=2):
     zscore_peak_threshold: Number of standard deviations the ripple peak power must exceed to be considered a ripple
     smoothing_sigma : Amount to smooth the time series over time. The default is given assuming time is in units of seconds.
     close_ripple_threshold : Exclude ripples that occur within `close_ripple_threshold` of a previously detected ripple.
-    '''
+    """
     filtered_lfp = filter_lfp(lfp, fs, [80, 250])
-    window_size = int(0.005 * fs) # 5ms window
+    window_size = int(0.005 * fs)  # 5ms window
     power = fastrms(filtered_lfp, window_size)
 
     mean_power = np.mean(power)
     std_power = np.std(power)
 
     above_thresh = power > (mean_power + zscore_thresh * std_power)
-    start_idx_threshold = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
-    end_idx_threshold = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    start_idx_threshold = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
+    end_idx_threshold = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
     above_thresh2 = power > (mean_power + 1.5 * std_power)
-    start_idx_threshold2 = np.where(np.diff(np.concatenate(([0], above_thresh2.astype(int)))) == 1)[0]
-    end_idx_threshold2 = np.where(np.diff(np.concatenate((above_thresh2.astype(int), [0]))) == -1)[0]
+    start_idx_threshold2 = np.where(
+        np.diff(np.concatenate(([0], above_thresh2.astype(int)))) == 1
+    )[0]
+    end_idx_threshold2 = np.where(
+        np.diff(np.concatenate((above_thresh2.astype(int), [0]))) == -1
+    )[0]
 
     # extend the threshold to broader segment
     start_idx_ripple, end_idx_ripple = [], []
 
     for start, end in zip(start_idx_threshold, end_idx_threshold):
-        in_mean_idx = np.where((start_idx_threshold2 <= start) & (end_idx_threshold2 >= end))[0]
+        in_mean_idx = np.where(
+            (start_idx_threshold2 <= start) & (end_idx_threshold2 >= end)
+        )[0]
 
         if len(in_mean_idx) > 0:
             idx = in_mean_idx[0]
@@ -606,12 +753,14 @@ def find_ripples_diba(lfp, fs, min_duration=0, zscore_thresh=2):
 
     return {
         "StartIndex": np.unique(start_idx_ripple) / fs,
-        "EndIndex": np.unique(end_idx_ripple) / fs
+        "EndIndex": np.unique(end_idx_ripple) / fs,
     }
 
 
-def find_ripples_vicente(lfp, fs, min_duration=0.015, zscore_thresh=5, close_ripple_threshold=0.015):
-    '''
+def find_ripples_vicente(
+    lfp, fs, min_duration=0.015, zscore_thresh=5, close_ripple_threshold=0.015
+):
+    """
     ---------------------------------------------------------------------------------------------------
     reference:
     [1] Vicente, A. F., Slézia, A., Ghestem, A., Bernard, C., & Quilichini, P. P. (2020).
@@ -624,7 +773,7 @@ def find_ripples_vicente(lfp, fs, min_duration=0.015, zscore_thresh=5, close_rip
     zscore_peak_threshold: Number of standard deviations the ripple peak power must exceed to be considered a ripple
     smoothing_sigma : Amount to smooth the time series over time. The default is given assuming time is in units of seconds.
     close_ripple_threshold : Exclude ripples that occur within `close_ripple_threshold` of a previously detected ripple.
-    '''
+    """
     filtered_lfp = filter_lfp(lfp, fs, [80, 250])
     window_size = int(0.005 * fs)
     power = fastrms(filtered_lfp, window_size)
@@ -635,17 +784,27 @@ def find_ripples_vicente(lfp, fs, min_duration=0.015, zscore_thresh=5, close_rip
     above_thresh = power > (mean_power + zscore_thresh * std_power)
     above_thresh2 = power > (mean_power + 0.5 * std_power)
 
-    start_idx_threshold = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
-    end_idx_threshold = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    start_idx_threshold = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
+    end_idx_threshold = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
-    start_idx_threshold2 = np.where(np.diff(np.concatenate(([0], above_thresh2.astype(int)))) == 1)[0]
-    end_idx_threshold2 = np.where(np.diff(np.concatenate((above_thresh2.astype(int), [0]))) == -1)[0]
+    start_idx_threshold2 = np.where(
+        np.diff(np.concatenate(([0], above_thresh2.astype(int)))) == 1
+    )[0]
+    end_idx_threshold2 = np.where(
+        np.diff(np.concatenate((above_thresh2.astype(int), [0]))) == -1
+    )[0]
 
     # extend the threshold using broader threshold segments
     start_idx_ripple, end_idx_ripple = [], []
 
     for start, end in zip(start_idx_threshold, end_idx_threshold):
-        in_mean_idx = np.where((start_idx_threshold2 <= start) & (end_idx_threshold2 >= end))[0]
+        in_mean_idx = np.where(
+            (start_idx_threshold2 <= start) & (end_idx_threshold2 >= end)
+        )[0]
 
         if len(in_mean_idx) > 0:
             idx = in_mean_idx[0]
@@ -657,11 +816,13 @@ def find_ripples_vicente(lfp, fs, min_duration=0.015, zscore_thresh=5, close_rip
                 end_idx_ripple.append(ripple_end)
 
     # merge close ripples
-    merged_starts, merged_ends = merge_close_ripples(start_idx_ripple, end_idx_ripple, fs, close_ripple_threshold)
+    merged_starts, merged_ends = merge_close_ripples(
+        start_idx_ripple, end_idx_ripple, fs, close_ripple_threshold
+    )
     # Merge close ripples
     return {
         "StartIndex": np.array(merged_starts) / fs,
-        "EndIndex": np.array(merged_ends) / fs
+        "EndIndex": np.array(merged_ends) / fs,
     }
 
 
@@ -693,5 +854,5 @@ def find_bouts(scoring_data, target_value=3, fs=1000):
     starts = np.where(diff == 1)[0]
     ends = np.where(diff == -1)[0]
 
-    bouts = [(s*fs, e*fs) for s, e in zip(starts, ends)]
+    bouts = [(s * fs, e * fs) for s, e in zip(starts, ends)]
     return bouts

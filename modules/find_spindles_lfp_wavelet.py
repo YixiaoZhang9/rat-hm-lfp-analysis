@@ -1,7 +1,9 @@
 import numpy as np
-from scipy.signal import fftconvolve, hilbert, get_window
 from scipy.ndimage import gaussian_filter1d
+from scipy.signal import fftconvolve, get_window, hilbert
+
 from modules.lfp_artifact_MAD_detection import mad_artifact_detector
+
 
 def intervals_to_mask(intervals, timestamps):
     mask = np.zeros_like(timestamps, dtype=bool)
@@ -9,7 +11,8 @@ def intervals_to_mask(intervals, timestamps):
         mask |= (timestamps >= start) & (timestamps <= end)
     return mask
 
-def compute_peak_mean_frequency(segment, fs, window_type='hamming',freq_band=(9, 20)):
+
+def compute_peak_mean_frequency(segment, fs, window_type="hamming", freq_band=(9, 20)):
     """
     Compute the spectral centroid of a short signal segment.
 
@@ -72,8 +75,19 @@ def compute_peak_mean_frequency(segment, fs, window_type='hamming',freq_band=(9,
     return peak_freq, mean_freq
 
 
-def find_spindles_lfp_wavelet(raw_signal, signal, fs,freq_range=(9, 20),duration_core_min=0.2,
-    duration_min=0.4,duration_max=3.5,merge_interval=0.5,amp_core=6,amp=3,threshold_type="median"):
+def find_spindles_lfp_wavelet(
+    raw_signal,
+    signal,
+    fs,
+    freq_range=(9, 20),
+    duration_core_min=0.2,
+    duration_min=0.4,
+    duration_max=3.5,
+    merge_interval=0.5,
+    amp_core=6,
+    amp=3,
+    threshold_type="median",
+):
     """
     Detect sleep spindles using a wavelet-like spindle-band power detector with artifact rejection.
 
@@ -150,8 +164,13 @@ def find_spindles_lfp_wavelet(raw_signal, signal, fs,freq_range=(9, 20),duration
     n_samples = len(signal)
 
     # Detect LFP artifacts using the median absolute deviation method
-    (valid_times, artifact_intervals_s) = mad_artifact_detector(raw_signal, mad_thresh = 6.0, proportion_above_thresh = 0.1,
-                                                                removal_window_ms = 100.0,sampling_frequency = fs)
+    (valid_times, artifact_intervals_s) = mad_artifact_detector(
+        raw_signal,
+        mad_thresh=6.0,
+        proportion_above_thresh=0.1,
+        removal_window_ms=100.0,
+        sampling_frequency=fs,
+    )
     t = np.arange(len(signal)) / fs
     valid_mask = intervals_to_mask(valid_times, t)
 
@@ -169,10 +188,10 @@ def find_spindles_lfp_wavelet(raw_signal, signal, fs,freq_range=(9, 20),duration
     fx = np.exp(-0.5 * ((np.abs(hz) - center) / width) ** 2)
 
     wavelet = np.real(np.fft.fftshift(np.fft.ifft(fx)))
-    wavelet /= np.sqrt(np.sum(np.abs(wavelet)**2)) #L2 normalization
+    wavelet /= np.sqrt(np.sum(np.abs(wavelet) ** 2))  # L2 normalization
 
     # apply Convolution
-    conv = fftconvolve(signal, wavelet, mode='same')
+    conv = fftconvolve(signal, wavelet, mode="same")
     coef = np.abs(conv) ** 2
 
     #  smoothing
@@ -211,8 +230,7 @@ def find_spindles_lfp_wavelet(raw_signal, signal, fs,freq_range=(9, 20),duration
     events = []
 
     for start_core, end_core in zip(start_idx_core_spindle, end_idx_core_spindle):
-
-        duration_core = (end_core - start_core+1) / fs
+        duration_core = (end_core - start_core + 1) / fs
         if not (duration_core_min <= duration_core <= duration_max):
             continue
 
@@ -225,7 +243,7 @@ def find_spindles_lfp_wavelet(raw_signal, signal, fs,freq_range=(9, 20),duration
         start_idx = start_idx[-1]
         end_idx = end_idx[0]
 
-        duration = (end_idx - start_idx+1) / fs
+        duration = (end_idx - start_idx + 1) / fs
         if not (duration_min <= duration <= duration_max):
             continue
 
@@ -245,8 +263,7 @@ def find_spindles_lfp_wavelet(raw_signal, signal, fs,freq_range=(9, 20),duration
 
     # remove too long
     merged = [
-        (start, end) for start, end in merged
-        if (end - start+1) / fs <= duration_max
+        (start, end) for start, end in merged if (end - start + 1) / fs <= duration_max
     ]
 
     # Final artifact check
@@ -256,22 +273,21 @@ def find_spindles_lfp_wavelet(raw_signal, signal, fs,freq_range=(9, 20),duration
     spindles = []
 
     for start_idx, end_idx in merged:
-
         # bounds safe
         start_buf = max(0, start_idx - buffer)
 
         end_buf = min(n_samples, end_idx + buffer)
 
         # spindle must be artifact free
-        if not np.all(valid_mask[start_idx:end_idx+1]):
+        if not np.all(valid_mask[start_idx : end_idx + 1]):
             continue
 
         # buffer region must also be clean
-        if not np.all(valid_mask[start_buf:end_buf+1]):
+        if not np.all(valid_mask[start_buf : end_buf + 1]):
             continue
 
         # peak detection
-        peak_idx = start_idx + np.argmax(x[start_idx:end_idx+1])
+        peak_idx = start_idx + np.argmax(x[start_idx : end_idx + 1])
 
         # peak must be clean
         if not valid_mask[peak_idx]:
@@ -284,21 +300,25 @@ def find_spindles_lfp_wavelet(raw_signal, signal, fs,freq_range=(9, 20),duration
     for start_idx, peak_idx, end_idx in spindles:
         duration_spindle = (end_idx - start_idx + 1) / fs
 
-        envelope_segment = envelope[start_idx:end_idx + 1]
+        envelope_segment = envelope[start_idx : end_idx + 1]
         amplitude_spindle = np.max(envelope_segment)
 
-        signal_segment = signal[start_idx:end_idx + 1]
-        peak_frequency_spindle, mean_frequency_spindle = compute_peak_mean_frequency(signal_segment,fs,freq_band=freq_range)
+        signal_segment = signal[start_idx : end_idx + 1]
+        peak_frequency_spindle, mean_frequency_spindle = compute_peak_mean_frequency(
+            signal_segment, fs, freq_band=freq_range
+        )
 
-        spindle_features.append([
-            start_idx,
-            peak_idx,
-            end_idx,
-            duration_spindle,
-            amplitude_spindle,
-            peak_frequency_spindle,
-            mean_frequency_spindle
-        ])
+        spindle_features.append(
+            [
+                start_idx,
+                peak_idx,
+                end_idx,
+                duration_spindle,
+                amplitude_spindle,
+                peak_frequency_spindle,
+                mean_frequency_spindle,
+            ]
+        )
 
     if len(spindle_features) == 0:
         return np.empty((0, 7))

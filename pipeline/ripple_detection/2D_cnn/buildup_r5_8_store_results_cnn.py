@@ -1,15 +1,15 @@
 import os
 import re
+
 import numpy as np
 import pandas as pd
-from scipy.io import loadmat
-from scipy.signal import hilbert
-from scipy.ndimage import label
-
 from demo_application_functions_m import *
-from modules.threshold_ripple_detection import find_bouts, filter_lfp
-from scipy.signal import hilbert,convolve
+from scipy.io import loadmat
+from scipy.ndimage import label
+from scipy.signal import convolve, hilbert
 from scipy.signal.windows import gaussian
+
+from modules.threshold_ripple_detection import filter_lfp, find_bouts
 
 
 def smooth_signal(signal, fs, sigma):
@@ -19,27 +19,34 @@ def smooth_signal(signal, fs, sigma):
     # Create a Gaussian window with a standard deviation
     window_size = smoothing_sigma * 3 * 2
     # in a Gaussian distribution, about 99.7 % of the distribution's area lies within ±3σ.
-    std = (window_size-1)/(2*sigma)
+    std = (window_size - 1) / (2 * sigma)
     gauss_filter = gaussian(window_size, std)
     # Normalize the Gaussian filter
     gauss_filter = gauss_filter / sum(gauss_filter)
     # Apply the filter using convolution
-    smoothed_lfp = convolve(signal, gauss_filter, 'same')
+    smoothed_lfp = convolve(signal, gauss_filter, "same")
     return smoothed_lfp
 
 
-#%%
+# %%
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = '/media/yixiao/GL14_RAT_FA/'
-dir_R5_8_Data = os.path.join(dir_base1,'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData')
-dir_R5_8_Scoring = os.path.join(dir_base1,'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring')
-dir_output = os.path.join(dir_base1,'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Ripple_detection_results')
+dir_base1 = "/media/yixiao/GL14_RAT_FA/"
+dir_R5_8_Data = os.path.join(
+    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData"
+)
+dir_R5_8_Scoring = os.path.join(
+    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring"
+)
+dir_output = os.path.join(
+    dir_base1,
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Ripple_detection_results",
+)
 
 
-rats = [7,8]
-regions = ['HPC','PL','RSC']
-sleep_periods = ['presleep','postsleep']
-fs = 1000 # downsampled sample frequency
+rats = [7, 8]
+regions = ["HPC", "PL", "RSC"]
+sleep_periods = ["presleep", "postsleep"]
+fs = 1000  # downsampled sample frequency
 
 # %%
 # prepare the spectral images for testing
@@ -57,10 +64,15 @@ pad = int(0.05 * fs)  # 50 ms padding
 # Minimum NREM bout length (to avoid unstable estimation)
 min_bout_samples = int(0.3 * fs)  # 300 ms
 
-model_path = Path.cwd().resolve().parents[1] /"ripple_detection"/"2D_cnn"/"retraining_saved_model.pth"
+model_path = (
+    Path.cwd().resolve().parents[1]
+    / "ripple_detection"
+    / "2D_cnn"
+    / "retraining_saved_model.pth"
+)
 
 for rat in rats:
-    rat_str = f'rat{rat}'
+    rat_str = f"rat{rat}"
     print(f"\n===== Processing {rat_str} =====")
 
     for region in [regions[0]]:
@@ -69,13 +81,14 @@ for rat in rats:
         if not os.path.exists(dir_R5_8_Data_perday):
             continue
 
-        folders_SD = [d for d in os.listdir(dir_R5_8_Data_perday)
-                      if os.path.isdir(os.path.join(dir_R5_8_Data_perday, d))]
+        folders_SD = [
+            d
+            for d in os.listdir(dir_R5_8_Data_perday)
+            if os.path.isdir(os.path.join(dir_R5_8_Data_perday, d))
+        ]
 
         for studyday in folders_SD:
-
             for sleep_period in sleep_periods:
-
                 print(f"Processing {rat_str} | {studyday} | {sleep_period}")
 
                 dir_trial = os.path.join(dir_R5_8_Data_perday, studyday, sleep_period)
@@ -84,11 +97,15 @@ for rat in rats:
                     print(f"Missing: {dir_trial}")
                     continue
 
-                path_scoring = os.path.join(dir_R5_8_Scoring, str(rat), str(studyday), sleep_period)
+                path_scoring = os.path.join(
+                    dir_R5_8_Scoring, str(rat), str(studyday), sleep_period
+                )
                 if not os.path.exists(path_scoring):
                     continue
 
-                scoring_files = [f for f in os.listdir(path_scoring) if f.endswith(".mat")]
+                scoring_files = [
+                    f for f in os.listdir(path_scoring) if f.endswith(".mat")
+                ]
 
                 # find all trial files
                 for root, _, files in os.walk(dir_trial):
@@ -100,24 +117,28 @@ for rat in rats:
                         print(f"  Trial: {name}")
 
                         trial_data = loadmat(trial_path)
-                        lfp = trial_data['data'].squeeze()
+                        lfp = trial_data["data"].squeeze()
                         time = np.arange(len(lfp)) / fs
 
                         # # load sleep scoring files
                         if len(scoring_files) == 1:
-                            scoring_data = loadmat(os.path.join(path_scoring, scoring_files[0]))['states'].squeeze()
+                            scoring_data = loadmat(
+                                os.path.join(path_scoring, scoring_files[0])
+                            )["states"].squeeze()
                         else:
-                            match = re.search(r'_(\d+)\.mat$', name)
+                            match = re.search(r"_(\d+)\.mat$", name)
                             if not match:
                                 continue
 
                             suffix = match.group(1).zfill(2)
-                            pattern = re.compile(rf'_{suffix}_')
+                            pattern = re.compile(rf"_{suffix}_")
 
                             scoring_data = None
                             for f in scoring_files:
                                 if pattern.search(f):
-                                    scoring_data = loadmat(os.path.join(path_scoring, f))['states'].squeeze()
+                                    scoring_data = loadmat(
+                                        os.path.join(path_scoring, f)
+                                    )["states"].squeeze()
                                     break
 
                             if scoring_data is None:
@@ -131,7 +152,6 @@ for rat in rats:
 
                         # Loop over each NREM bout independently
                         for bout_idx, (b_start, b_end) in enumerate(NREM_bouts):
-
                             # Skip very short bouts (insufficient for spectral analysis)
                             if (b_end - b_start) < min_bout_samples:
                                 continue
@@ -145,19 +165,24 @@ for rat in rats:
                             temp_dir = os.path.join(dir_output, f"temp_bout_{bout_idx}")
                             os.makedirs(temp_dir, exist_ok=True)
 
-
                             # Generate spectrogram images for CNN classification
-                            start_time_dict, stop_time_dict = make_spectra_image_files(lfp_bout,time_bout,
-                                out_dir=temp_dir,fs=fs,segment_ms=window_ms,
-                                overlap=overlap,f_min=f_min,f_max=f_max)
-
+                            start_time_dict, stop_time_dict = make_spectra_image_files(
+                                lfp_bout,
+                                time_bout,
+                                out_dir=temp_dir,
+                                fs=fs,
+                                segment_ms=window_ms,
+                                overlap=overlap,
+                                f_min=f_min,
+                                f_max=f_max,
+                            )
 
                             # Run CNN inference on generated spectrograms
                             test_df = compute_CNN(
                                 image_path=temp_dir,
                                 start_time_dict=start_time_dict,
                                 stop_time_dict=stop_time_dict,
-                                model_path=model_path
+                                model_path=model_path,
                             )
 
                             # Clean up temporary spectrogram images immediately
@@ -171,7 +196,7 @@ for rat in rats:
                             intervals = [
                                 [
                                     float(test_df.iloc[i]["start time"]),
-                                    float(test_df.iloc[i]["stop time"])
+                                    float(test_df.iloc[i]["stop time"]),
                                 ]
                                 for i in indices
                             ]
@@ -189,7 +214,9 @@ for rat in rats:
                                     curr_start, curr_stop = interval
 
                                     if curr_start <= prev_stop:
-                                        merged_intervals[-1][1] = max(prev_stop, curr_stop)
+                                        merged_intervals[-1][1] = max(
+                                            prev_stop, curr_stop
+                                        )
                                     else:
                                         merged_intervals.append(interval)
 
@@ -199,17 +226,14 @@ for rat in rats:
                             envelope_lfp = np.abs(hilbert(filtered_lfp))
                             envelope = envelope_lfp[b_start:b_end]
 
-
                             # Avoid numerical instability in flat signals
                             if np.std(envelope) < 1e-6:
                                 continue
 
                             z_env = (envelope - np.mean(envelope)) / np.std(envelope)
 
-
                             # Refine CNN detections using envelope thresholding
-                            for (start_t, stop_t) in merged_intervals:
-
+                            for start_t, stop_t in merged_intervals:
                                 # Convert time (s) to sample indices (within bout)
                                 start_idx = max(0, int(start_t * fs) - pad)
                                 stop_idx = min(len(z_env) - 1, int(stop_t * fs) + pad)
@@ -224,7 +248,6 @@ for rat in rats:
                                 labeled, n_events = label(mask)
 
                                 for i in range(1, n_events + 1):
-
                                     idxs = np.where(labeled == i)[0]
                                     if len(idxs) == 0:
                                         continue
@@ -240,7 +263,10 @@ for rat in rats:
 
                                     # Expand to offset (forward)
                                     offset = peak_idx
-                                    while offset < len(z_env) - 1 and z_env[offset] > low_th:
+                                    while (
+                                        offset < len(z_env) - 1
+                                        and z_env[offset] > low_th
+                                    ):
                                         offset += 1
 
                                     # Compute duration
@@ -251,7 +277,9 @@ for rat in rats:
                                     global_offset = offset + b_start
 
                                     candidate_events = []
-                                    candidate_events.append([global_onset, global_offset])
+                                    candidate_events.append(
+                                        [global_onset, global_offset]
+                                    )
 
                                     # ---- merge close events ----
                                     min_gap = int(0.015 * fs)  # 15 ms
@@ -269,7 +297,9 @@ for rat in rats:
 
                                             # merge if overlap OR very close
                                             if curr_start <= prev_end + min_gap:
-                                                merged_events[-1][1] = max(prev_end, curr_end)
+                                                merged_events[-1][1] = max(
+                                                    prev_end, curr_end
+                                                )
                                             else:
                                                 merged_events.append(event)
 
@@ -277,34 +307,40 @@ for rat in rats:
                                     max_dur = 0.5  # 500 ms
 
                                     for onset, offset in merged_events:
-
                                         duration_sec = (offset - onset) / fs
 
-                                        if duration_sec < min_dur or duration_sec > max_dur:
+                                        if (
+                                            duration_sec < min_dur
+                                            or duration_sec > max_dur
+                                        ):
                                             continue
 
-                                        ripple_rows.append({
-                                            "ripple_start": onset,
-                                            "ripple_end": offset,
-                                            "ripple_duration_sec": duration_sec,
-                                            "nrem_bout_duration_sec": (b_end - b_start) / fs
-                                        })
+                                        ripple_rows.append(
+                                            {
+                                                "ripple_start": onset,
+                                                "ripple_end": offset,
+                                                "ripple_duration_sec": duration_sec,
+                                                "nrem_bout_duration_sec": (
+                                                    b_end - b_start
+                                                )
+                                                / fs,
+                                            }
+                                        )
 
                         # save CSV
                         df = pd.DataFrame(ripple_rows)
 
-                        output_dir = os.path.join(dir_output, str(rat), studyday, sleep_period)
+                        output_dir = os.path.join(
+                            dir_output, str(rat), studyday, sleep_period
+                        )
                         os.makedirs(output_dir, exist_ok=True)
 
                         trial_id = name.replace(".mat", "")
-                        save_path = os.path.join(output_dir, f"{trial_id}_hippocampal_ripples_cnn2.csv")
+                        save_path = os.path.join(
+                            output_dir, f"{trial_id}_hippocampal_ripples_cnn2.csv"
+                        )
 
                         df.to_csv(save_path, index=False)
 
 
 print("\n CNN ripple detection DONE")
-
-
-
-
-

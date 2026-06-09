@@ -1,14 +1,16 @@
-import numpy as np
-from scipy.stats import zscore
 import matplotlib.pyplot as plt
-from modules.lfp_artifact_MAD_detection import mad_artifact_detector
+import numpy as np
 from scipy.signal import butter, filtfilt
+
+from modules.lfp_artifact_MAD_detection import mad_artifact_detector
+
 
 def intervals_to_mask(intervals, timestamps):
     mask = np.zeros_like(timestamps, dtype=bool)
     for start, end in intervals:
         mask |= (timestamps >= start) & (timestamps <= end)
     return mask
+
 
 def robust_zscore(x):
     """
@@ -22,14 +24,21 @@ def robust_zscore(x):
     return (x - med) / (1.4826 * mad)
 
 
-def filter_lfp(lfp, fs,freq_range):
+def filter_lfp(lfp, fs, freq_range):
     # Bandpass filter
-    b, a = butter(4, np.array(freq_range)/(fs/2), btype='band')
+    b, a = butter(4, np.array(freq_range) / (fs / 2), btype="band")
     return filtfilt(b, a, lfp)
 
 
-def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durations=(150, 500), f_plot=False,plot_range=None):
-
+def find_deltas_lfp(
+    raw_signal,
+    signal,
+    fs=1000,
+    thresholds=(1, 2, 0, 1.5),
+    durations=(150, 500),
+    f_plot=False,
+    plot_range=None,
+):
     """
     Detect LFP delta events and extract waveform features.
 
@@ -89,10 +98,14 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
     (at your option) any later version.
     """
 
-
     # Detect LFP artifacts using the median absolute deviation method
-    (valid_times, artifact_intervals_s) = mad_artifact_detector(raw_signal, mad_thresh=6.0, proportion_above_thresh=0.1,
-                                                                removal_window_ms=100.0, sampling_frequency=fs)
+    (valid_times, artifact_intervals_s) = mad_artifact_detector(
+        raw_signal,
+        mad_thresh=6.0,
+        proportion_above_thresh=0.1,
+        removal_window_ms=100.0,
+        sampling_frequency=fs,
+    )
 
     t = np.arange(len(signal)) / fs
     valid_mask = intervals_to_mask(valid_times, t)
@@ -117,21 +130,31 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
     z_signal_diff = robust_zscore(signal_diff)
 
     # zero crossings
-    up_crossing = np.where((z_signal_diff[:-1] < 0) & (z_signal_diff[1:] >= 0))[0] + 1   #up crossing
-    down_crossing = np.where((z_signal_diff[:-1] > 0) & (z_signal_diff[1:] <= 0))[0] + 1  #down crossing
+    up_crossing = (
+        np.where((z_signal_diff[:-1] < 0) & (z_signal_diff[1:] >= 0))[0] + 1
+    )  # up crossing
+    down_crossing = (
+        np.where((z_signal_diff[:-1] > 0) & (z_signal_diff[1:] <= 0))[0] + 1
+    )  # down crossing
 
-    if len(down_crossing) > 0 and len(up_crossing) > 0 and down_crossing[0] < up_crossing[0]:
+    if (
+        len(down_crossing) > 0
+        and len(up_crossing) > 0
+        and down_crossing[0] < up_crossing[0]
+    ):
         down_crossing = down_crossing[1:]
 
     n_events = min(len(up_crossing), len(down_crossing))
     if n_events < 2:
         return np.empty((0, 9))
 
-    triplets = np.column_stack([
-        up_crossing[:n_events - 1],
-        down_crossing[:n_events - 1],
-        up_crossing[1:n_events]
-    ])
+    triplets = np.column_stack(
+        [
+            up_crossing[: n_events - 1],
+            down_crossing[: n_events - 1],
+            up_crossing[1:n_events],
+        ]
+    )
 
     # Strict artifact rejection
     # Reject candidate delta waves if they overlap with
@@ -139,7 +162,7 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
     # (artifact ± 1 s) to avoid filter ringing and
     # artifact-induced baseline distortions.
 
-    artifact_padding_s = 1.0 # second
+    artifact_padding_s = 1.0  # second
 
     expanded_artifact_mask = np.zeros_like(valid_mask)
 
@@ -147,19 +170,17 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
         start_s = max(0, start_s - artifact_padding_s)
         end_s = min(len(signal) / fs, end_s + artifact_padding_s)
 
-        expanded_artifact_mask |= ((t >= start_s) &(t <= end_s))
+        expanded_artifact_mask |= (t >= start_s) & (t <= end_s)
 
     keep_triplet = []
 
     for a, b, c in triplets:
-
-        if np.any(expanded_artifact_mask[a:c + 1]):
+        if np.any(expanded_artifact_mask[a : c + 1]):
             continue
 
         keep_triplet.append([a, b, c])
 
     if len(keep_triplet) == 0:
-
         return np.empty((0, 9))
 
     triplets = np.array(keep_triplet)
@@ -178,7 +199,7 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
     # Duration filter
     duration = delta[:, 2] - delta[:, 0]
 
-    keep_duration = ((duration >= minSamples) & (duration <= maxSamples))
+    keep_duration = (duration >= minSamples) & (duration <= maxSamples)
 
     delta = delta[keep_duration]
 
@@ -201,12 +222,11 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
     delta_features = np.zeros((len(delta), 9))
 
     for i, row in enumerate(delta):
-
         a = int(row[0])
         b = int(row[1])
         c = int(row[2])
 
-        event_signal = signal[a:c + 1]
+        event_signal = signal[a : c + 1]
 
         # Duration / s
         duration_s = (c - a) / fs
@@ -238,7 +258,6 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
 
     # plot
     if f_plot:
-
         if plot_range is None:
             plot_start = 0
             plot_end = len(signal)
@@ -253,15 +272,19 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
         ax = axes[0]
         filtered_raw_signal = filter_lfp(raw_signal, fs, [0.3, 30])
 
-        ax.plot(t[plot_start:plot_end],filtered_raw_signal[plot_start:plot_end],color='black',linewidth=1)
+        ax.plot(
+            t[plot_start:plot_end],
+            filtered_raw_signal[plot_start:plot_end],
+            color="black",
+            linewidth=1,
+        )
 
         # artifact regions
         for start_s, end_s in artifact_intervals_s:
-            ax.axvspan(start_s, end_s, color='gray', alpha=0.3)
+            ax.axvspan(start_s, end_s, color="gray", alpha=0.3)
 
         # accepted delta events
         for row in delta:
-
             a = int(row[0])
             b = int(row[1])
             c = int(row[2])
@@ -270,7 +293,7 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
             if c < plot_start or a > plot_end:
                 continue
 
-            ax.axvspan(a / fs, c / fs, color='red', alpha=0.2)
+            ax.axvspan(a / fs, c / fs, color="red", alpha=0.2)
 
             # ax.plot(
             #     [a / fs, b / fs, c / fs],
@@ -282,22 +305,38 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
         ax.set_ylabel("Raw signal")
         ax.set_title("Raw signal(0.3-30Hz filtered) + detected delta waves")
 
-        #z-scored signal
+        # z-scored signal
 
         ax2 = axes[1]
-        ax2.plot( t[plot_start:plot_end], z_signal[plot_start:plot_end], color='black', linewidth=1 )
+        ax2.plot(
+            t[plot_start:plot_end],
+            z_signal[plot_start:plot_end],
+            color="black",
+            linewidth=1,
+        )
 
         # extrema
-        ax2.scatter( up_crossing / fs, z_signal[up_crossing], color='blue', s=20, label='up crossing')
-        ax2.scatter( down_crossing / fs, z_signal[down_crossing], color='orange', s=20, label='down crossing')
+        ax2.scatter(
+            up_crossing / fs,
+            z_signal[up_crossing],
+            color="blue",
+            s=20,
+            label="up crossing",
+        )
+        ax2.scatter(
+            down_crossing / fs,
+            z_signal[down_crossing],
+            color="orange",
+            s=20,
+            label="down crossing",
+        )
 
         # artifact regions
         for start_s, end_s in artifact_intervals_s:
-            ax2.axvspan( start_s, end_s, color='gray', alpha=0.3)
+            ax2.axvspan(start_s, end_s, color="gray", alpha=0.3)
 
         # detected delta
         for row in delta:
-
             a = int(row[0])
             b = int(row[1])
             c = int(row[2])
@@ -305,23 +344,28 @@ def find_deltas_lfp(raw_signal, signal, fs=1000,thresholds=(1, 2, 0, 1.5),durati
             if c < plot_start or a > plot_end:
                 continue
 
-            ax2.axvspan(a / fs,c / fs,color='red',alpha=0.2)
+            ax2.axvspan(a / fs, c / fs, color="red", alpha=0.2)
 
-            ax2.plot([a / fs, b / fs, c / fs],[z_signal[a], z_signal[b], z_signal[c]],color='red',linewidth=2)
+            ax2.plot(
+                [a / fs, b / fs, c / fs],
+                [z_signal[a], z_signal[b], z_signal[c]],
+                color="red",
+                linewidth=2,
+            )
 
         # thresholds
-        ax2.axhline(lowPeak, color='green', linestyle='--', alpha=0.5)
+        ax2.axhline(lowPeak, color="green", linestyle="--", alpha=0.5)
 
-        ax2.axhline(highPeak, color='green', linestyle='-')
+        ax2.axhline(highPeak, color="green", linestyle="-")
 
-        ax2.axhline(-lowTrough, color='purple', linestyle='--', alpha=0.5)
+        ax2.axhline(-lowTrough, color="purple", linestyle="--", alpha=0.5)
 
-        ax2.axhline( -highTrough, color='purple', linestyle='-')
+        ax2.axhline(-highTrough, color="purple", linestyle="-")
 
         ax2.set_xlabel("Time (s)")
         ax2.set_ylabel("Z-scored signal")
 
-        ax2.set_title( f"Detected Delta Waves | n={len(delta)}")
+        ax2.set_title(f"Detected Delta Waves | n={len(delta)}")
 
         ax2.legend()
 

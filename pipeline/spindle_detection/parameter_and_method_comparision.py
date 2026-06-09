@@ -1,11 +1,8 @@
-import os
 import re
-import numpy as np
-import pandas as pd
-from tqdm import tqdm
+
 import matplotlib.pyplot as plt
+import pandas as pd
 import seaborn as sns
-from scipy.stats import gaussian_kde
 
 # bases = [
 #     '/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Spindle_detection_results',
@@ -120,20 +117,20 @@ from scipy.stats import gaussian_kde
 summary = pd.read_csv("spindle_parameter_summary.csv")
 
 
-
-
-
-#%%
+# %%
 # =========================
 # 1. RATE COMPARISON PLOT
-summary_region = (summary.groupby(["rat", "region", "params"]).agg({
-        "rate_per_min": "mean",
-        "mean_duration": "mean"}).reset_index()
+summary_region = (
+    summary.groupby(["rat", "region", "params"])
+    .agg({"rate_per_min": "mean", "mean_duration": "mean"})
+    .reset_index()
 )
 methods = {
     "Envelope": summary_region[summary_region["params"].str.contains("envelop")],
     "Wavelet": summary_region[summary_region["params"].str.contains("wavelet_amp")],
-    "WaveletOptimal": summary_region[summary_region["params"].str.contains("wavelet_optimal")]
+    "WaveletOptimal": summary_region[
+        summary_region["params"].str.contains("wavelet_optimal")
+    ],
 }
 for method_name, method_df in methods.items():
     # order = (
@@ -144,20 +141,12 @@ for method_name, method_df in methods.items():
     # )
     order = sorted(
         method_df["params"].unique(),
-        key=lambda x: tuple(
-            float(n)
-            for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(x))
-        )
+        key=lambda x: tuple(float(n) for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(x))),
     )
-    plt.figure(figsize=(18,8))
+    plt.figure(figsize=(18, 8))
     # violin
     sns.violinplot(
-        data=method_df,
-        x="params",
-        y="rate_per_min",
-        order=order,
-        inner=None,
-        cut=0
+        data=method_df, x="params", y="rate_per_min", order=order, inner=None, cut=0
     )
     # rat points
     sns.stripplot(
@@ -168,24 +157,21 @@ for method_name, method_df in methods.items():
         order=order,
         dodge=True,
         size=7,
-        alpha=0.8
+        alpha=0.8,
     )
     # literature range
-    plt.axhspan(2, 6, alpha=0.15, color='green')
+    plt.axhspan(2, 6, alpha=0.15, color="green")
     plt.xticks(rotation=45, fontsize=15)
     plt.yticks(fontsize=15)
     plt.ylabel("Mean spindle rate (/min NREM)", fontsize=20)
     plt.xlabel("Parameters", fontsize=20)
-    plt.title(
-        f"{method_name} Rate Stability Across Rats & Regions",
-        fontsize=22
-    )
+    plt.title(f"{method_name} Rate Stability Across Rats & Regions", fontsize=22)
     plt.legend(
         title="Region",
         fontsize=20,
         title_fontsize=20,
-        bbox_to_anchor=(1.02,1),
-        loc='upper left'
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
     )
     plt.tight_layout()
     plt.show()
@@ -199,19 +185,11 @@ for method_name, method_df in methods.items():
     # )
     order = sorted(
         method_df["params"].unique(),
-        key=lambda x: tuple(
-            float(n)
-            for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(x))
-        )
+        key=lambda x: tuple(float(n) for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(x))),
     )
-    plt.figure(figsize=(18,8))
+    plt.figure(figsize=(18, 8))
     sns.violinplot(
-        data=method_df,
-        x="params",
-        y="mean_duration",
-        order=order,
-        inner=None,
-        cut=0
+        data=method_df, x="params", y="mean_duration", order=order, inner=None, cut=0
     )
     sns.stripplot(
         data=method_df,
@@ -221,23 +199,20 @@ for method_name, method_df in methods.items():
         order=order,
         dodge=True,
         size=7,
-        alpha=0.8
+        alpha=0.8,
     )
-    plt.axhspan(0.4, 3.5, alpha=0.15, color='green')
+    plt.axhspan(0.4, 3.5, alpha=0.15, color="green")
     plt.xticks(rotation=45, fontsize=15)
     plt.yticks(fontsize=15)
     plt.ylabel("Mean spindle duration (s)", fontsize=20)
     plt.xlabel("Parameters", fontsize=20)
-    plt.title(
-        f"{method_name} Duration Stability Across Rats & Regions",
-        fontsize=22
-    )
+    plt.title(f"{method_name} Duration Stability Across Rats & Regions", fontsize=22)
     plt.legend(
         title="Region",
         fontsize=20,
         title_fontsize=20,
-        bbox_to_anchor=(1.02,1),
-        loc='upper left'
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
     )
     plt.tight_layout()
     plt.show()
@@ -246,26 +221,15 @@ for method_name, method_df in methods.items():
 # 3. OVERALL RATE DISTRIBUTION
 # ====================================
 methods = {
-    "Envelope": summary[
-        summary["params"].str.contains("envelop")
-    ],
-
-    "Wavelet": summary[
-        summary["params"].str.contains("wavelet_amp")
-    ],
-
-    "WaveletOptimal": summary[
-        summary["params"].str.contains("wavelet_optimal")
-    ]
+    "Envelope": summary[summary["params"].str.contains("envelop")],
+    "Wavelet": summary[summary["params"].str.contains("wavelet_amp")],
+    "WaveletOptimal": summary[summary["params"].str.contains("wavelet_optimal")],
 }
 
 for method_name, method_df in methods.items():
     order = sorted(
         method_df["params"].unique(),
-        key=lambda x: tuple(
-            float(n)
-            for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(x))
-        )
+        key=lambda x: tuple(float(n) for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(x))),
     )
 
     plt.figure(figsize=(18, 8))
@@ -276,7 +240,7 @@ for method_name, method_df in methods.items():
         y="rate_per_min",
         order=order,
         inner="quartile",
-        cut=0
+        cut=0,
     )
 
     # sns.swarmplot(
@@ -289,7 +253,7 @@ for method_name, method_df in methods.items():
     #     alpha=0.4
     # )
 
-    plt.axhspan(2, 6, alpha=0.15, color='green')
+    plt.axhspan(2, 6, alpha=0.15, color="green")
 
     plt.xticks(rotation=45, fontsize=15)
     plt.yticks(fontsize=15)
@@ -297,10 +261,7 @@ for method_name, method_df in methods.items():
     plt.ylabel("Spindle rate (/min NREM)", fontsize=20)
     plt.xlabel("Parameters", fontsize=20)
 
-    plt.title(
-        f"{method_name} Overall Rate Distribution",
-        fontsize=22
-    )
+    plt.title(f"{method_name} Overall Rate Distribution", fontsize=22)
 
     plt.tight_layout()
     plt.show()
@@ -310,26 +271,15 @@ for method_name, method_df in methods.items():
 # 4. OVERALL DURATION DISTRIBUTION
 # ====================================
 methods = {
-    "Envelope": summary[
-        summary["params"].str.contains("envelop")
-    ],
-
-    "Wavelet": summary[
-        summary["params"].str.contains("wavelet_amp")
-    ],
-
-    "WaveletOptimal": summary[
-        summary["params"].str.contains("wavelet_optimal")
-    ]
+    "Envelope": summary[summary["params"].str.contains("envelop")],
+    "Wavelet": summary[summary["params"].str.contains("wavelet_amp")],
+    "WaveletOptimal": summary[summary["params"].str.contains("wavelet_optimal")],
 }
 
 for method_name, method_df in methods.items():
     order = sorted(
         method_df["params"].unique(),
-        key=lambda x: tuple(
-            float(n)
-            for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(x))
-        )
+        key=lambda x: tuple(float(n) for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(x))),
     )
 
     plt.figure(figsize=(18, 8))
@@ -340,7 +290,7 @@ for method_name, method_df in methods.items():
         y="mean_duration",
         order=order,
         inner="quartile",
-        cut=0
+        cut=0,
     )
 
     # sns.swarmplot(
@@ -353,7 +303,7 @@ for method_name, method_df in methods.items():
     #     alpha=0.4
     # )
 
-    plt.axhspan(0.4, 3.5, alpha=0.15, color='green')
+    plt.axhspan(0.4, 3.5, alpha=0.15, color="green")
 
     plt.xticks(rotation=45, fontsize=15)
     plt.yticks(fontsize=15)
@@ -361,10 +311,7 @@ for method_name, method_df in methods.items():
     plt.ylabel("Mean spindle duration (s)", fontsize=20)
     plt.xlabel("Parameters", fontsize=20)
 
-    plt.title(
-        f"{method_name} Overall Duration Distribution",
-        fontsize=22
-    )
+    plt.title(f"{method_name} Overall Duration Distribution", fontsize=22)
 
     plt.tight_layout()
     plt.show()

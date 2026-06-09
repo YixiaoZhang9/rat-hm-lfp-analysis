@@ -1,7 +1,15 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QSizePolicy
-from PyQt5.QtCore import Qt
-import pyqtgraph as pg
 import numpy as np
+import pyqtgraph as pg
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 class SignalPlotViewer(QWidget):
@@ -21,8 +29,8 @@ class SignalPlotViewer(QWidget):
         self.time = np.arange(self.total_len) / fs
 
         # Event regions
-        self.event_regions = []   # store LinearRegionItem objects
-        self.event_intervals = [] # store event sample indices
+        self.event_regions = []  # store LinearRegionItem objects
+        self.event_intervals = []  # store event sample indices
 
         # Amplitude scaling
         self.amplitude_scale = 1.0
@@ -34,8 +42,8 @@ class SignalPlotViewer(QWidget):
         self.resize(1200, 800)
 
         # PyQtGraph background/foreground
-        pg.setConfigOption('background', 'w')
-        pg.setConfigOption('foreground', 'k')
+        pg.setConfigOption("background", "w")
+        pg.setConfigOption("foreground", "k")
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
@@ -45,10 +53,10 @@ class SignalPlotViewer(QWidget):
         self.plot.showGrid(x=True, y=True)
         self.plot.setMenuEnabled(True)
         self.plot.setMouseEnabled(x=True, y=False)
-        self.plot.enableAutoRange('y', False)
-        self.plot.setLabel('bottom', 'Time', units='s')
+        self.plot.enableAutoRange("y", False)
+        self.plot.setLabel("bottom", "Time", units="s")
 
-        axis = self.plot.getAxis('bottom')
+        axis = self.plot.getAxis("bottom")
         axis.enableAutoSIPrefix(False)
         axis.setStyle(tickTextOffset=10, autoReduceTextSpace=False)
         axis.setTickSpacing(major=1, minor=0.5)
@@ -59,21 +67,31 @@ class SignalPlotViewer(QWidget):
         self.offsets = np.arange(self.num_channels) * self.offset_step
 
         self.colors = [
-            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
+            "#1f77b4",
+            "#ff7f0e",
+            "#2ca02c",
+            "#d62728",
+            "#9467bd",
+            "#8c564b",
+            "#e377c2",
+            "#7f7f7f",
+            "#bcbd22",
+            "#17becf",
         ]
 
         for i in range(self.num_channels):
             color = self.colors[i % len(self.colors)]
             # Enable downsampling and clipToView for performance
-            curve = self.plot.plot(pen=pg.mkPen(color, width=1.5),
-                                   downsample=10,
-                                   clipToView=True)
+            curve = self.plot.plot(
+                pen=pg.mkPen(color, width=1.5), downsample=10, clipToView=True
+            )
             self.curves.append(curve)
 
         # Y-axis ticks with channel names
-        ticks = [(offset, name) for offset, name in zip(self.offsets, self.channel_names)]
-        axis = self.plot.getAxis('left')
+        ticks = [
+            (offset, name) for offset, name in zip(self.offsets, self.channel_names)
+        ]
+        axis = self.plot.getAxis("left")
         axis.setTicks([ticks])
 
         main_layout.addWidget(self.plot)
@@ -109,7 +127,8 @@ class SignalPlotViewer(QWidget):
         # Time label
         self.label_time = QLabel("Time: 0.00 s")
         self.label_time.setAlignment(Qt.AlignCenter)
-        self.label_time.setStyleSheet("""
+        self.label_time.setStyleSheet(
+            """
             QLabel {
                 color: black;
                 font-weight: bold;
@@ -120,7 +139,8 @@ class SignalPlotViewer(QWidget):
                 border-radius: 3px;
                 padding: 3px;
             }
-        """)
+        """
+        )
 
         # Zoom buttons
         self.btn_zoom_in_time = QPushButton("+ Time")
@@ -129,9 +149,14 @@ class SignalPlotViewer(QWidget):
         self.btn_zoom_out_amp = QPushButton("- Amp")
 
         # Apply style and connect signals
-        for btn in [self.btn_left, self.btn_right,
-                    self.btn_zoom_in_time, self.btn_zoom_out_time,
-                    self.btn_zoom_in_amp, self.btn_zoom_out_amp]:
+        for btn in [
+            self.btn_left,
+            self.btn_right,
+            self.btn_zoom_in_time,
+            self.btn_zoom_out_time,
+            self.btn_zoom_in_amp,
+            self.btn_zoom_out_amp,
+        ]:
             btn.setStyleSheet(button_style)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
@@ -163,17 +188,20 @@ class SignalPlotViewer(QWidget):
 
         self.start_idx = self.slider.value()
         end_idx = min(self.start_idx + self.win_len, self.total_len)
-        t_window = self.time[self.start_idx:end_idx]
+        t_window = self.time[self.start_idx : end_idx]
         self.label_time.setText(f"Time: {t_window[0]:.2f} - {t_window[-1]:.2f} s")
         for i, ch in enumerate(self.channel_names):
-            data = self.data_dict[ch][self.start_idx:end_idx]
+            data = self.data_dict[ch][self.start_idx : end_idx]
             ptp = np.ptp(data) or 1
-            scaled_data = (data / ptp) * self.offset_step * 0.8 * self.amplitude_scale + self.offsets[i]
+            scaled_data = (
+                data / ptp
+            ) * self.offset_step * 0.8 * self.amplitude_scale + self.offsets[i]
             self.curves[i].setData(t_window, scaled_data)
 
         self.plot.setXRange(t_window[0], t_window[-1], padding=0)
-        self.plot.setYRange(-self.offset_step, self.offsets[-1] + self.offset_step,
-                        padding=0.1)
+        self.plot.setYRange(
+            -self.offset_step, self.offsets[-1] + self.offset_step, padding=0.1
+        )
 
         # Update event regions safely
         self.update_event_regions()
@@ -184,7 +212,9 @@ class SignalPlotViewer(QWidget):
         self.update_plot()
 
     def move_right(self):
-        new_val = min(self.slider.value() + int(self.win_len / 10), self.total_len - self.win_len)
+        new_val = min(
+            self.slider.value() + int(self.win_len / 10), self.total_len - self.win_len
+        )
         self.slider.setValue(new_val)
         self.update_plot()
 
@@ -246,7 +276,9 @@ class SignalPlotViewer(QWidget):
                 continue
             t_start = self.time[max(start, win_start)]
             t_end = self.time[min(end, win_end)]
-            region = pg.LinearRegionItem(values=(t_start, t_end), brush=pg.mkBrush(255, 0, 0, 50), movable=False)
+            region = pg.LinearRegionItem(
+                values=(t_start, t_end), brush=pg.mkBrush(255, 0, 0, 50), movable=False
+            )
             region.setZValue(-10)
             self.plot.addItem(region)
             self.event_regions.append(region)

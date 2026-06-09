@@ -1,14 +1,14 @@
-import numpy as np
-from numpy.fft import fft, ifft, fftfreq
-from scipy import signal
-from scipy.signal import butter, filtfilt, resample,freqz,iirnotch,welch
 import matplotlib.pyplot as plt
 import numba
+import numpy as np
+from numpy.fft import fft, fftfreq, ifft
+from scipy import signal
+from scipy.signal import filtfilt, freqz, iirnotch
 
 
-
-def ft_preproc_dftfilter(dat, Fs, Fl=50, dftreplace = 'neighbour', dftbandwidth = None, dftneighbourwidth = None):
-
+def ft_preproc_dftfilter(
+    dat, Fs, Fl=50, dftreplace="neighbour", dftbandwidth=None, dftneighbourwidth=None
+):
     """
     Python version of FieldTrip's ft_preproc_dftfilter.
 
@@ -109,7 +109,7 @@ def ft_preproc_dftfilter(dat, Fs, Fl=50, dftreplace = 'neighbour', dftbandwidth 
     if np.isnan(dat).any():
         print("Warning: Input data contains NaNs.")
 
-    if dftreplace == 'zero':
+    if dftreplace == "zero":
         time = np.arange(n_samples) / Fs
         filt = dat.copy()
 
@@ -145,14 +145,16 @@ def ft_preproc_dftfilter(dat, Fs, Fl=50, dftreplace = 'neighbour', dftbandwidth 
 
         return filt
 
-    elif dftreplace == 'neighbour':
+    elif dftreplace == "neighbour":
         Flwidth = np.atleast_1d(dftbandwidth)
         Neighwidth = np.atleast_1d(dftneighbourwidth)
 
         if len(Fl) != len(Flwidth) or len(Fl) != len(Neighwidth):
-            raise ValueError("Fl, dftbandwidth, and dftneighbourwidth must have the same length.")
+            raise ValueError(
+                "Fl, dftbandwidth, and dftneighbourwidth must have the same length."
+            )
 
-        freqs = fftfreq(n_samples, d = 1.0 / Fs)
+        freqs = fftfreq(n_samples, d=1.0 / Fs)
         data_fft = fft(dat, axis=1)
 
         for i, freq in enumerate(Fl):
@@ -166,12 +168,14 @@ def ft_preproc_dftfilter(dat, Fs, Fl=50, dftreplace = 'neighbour', dftbandwidth 
             # Indices of frequencies
             smpl2int = np.where((freqs >= f2int[0]) & (freqs <= f2int[1]))[0]
             smpl4int = np.where(
-                ((freqs >= f4int[0]) & (freqs < f4int[1])) |
-                ((freqs > f4int[2]) & (freqs <= f4int[3]))
+                ((freqs >= f4int[0]) & (freqs < f4int[1]))
+                | ((freqs > f4int[2]) & (freqs <= f4int[3]))
             )[0]
 
             # Compute new amplitude from neighbors
-            amp_neighbors = np.mean(np.abs(data_fft[:, smpl4int]), axis=1, keepdims=True)
+            amp_neighbors = np.mean(
+                np.abs(data_fft[:, smpl4int]), axis=1, keepdims=True
+            )
             phase_orig = np.angle(data_fft[:, smpl2int])
 
             # Replace amplitude, preserve phase
@@ -186,9 +190,7 @@ def ft_preproc_dftfilter(dat, Fs, Fl=50, dftreplace = 'neighbour', dftbandwidth 
         raise ValueError(f"Unknown dftreplace method: {dftreplace}")
 
 
-
-
-def ft_preproc_notch(dat, fs, powerline_freqs = [50], q = 30, plot_response = False):
+def ft_preproc_notch(dat, fs, powerline_freqs=[50], q=30, plot_response=False):
     """
     Apply notch filters to remove powerline noise and harmonics (e.g., 50Hz, 100Hz, 150Hz, ...).
 
@@ -215,22 +217,22 @@ def ft_preproc_notch(dat, fs, powerline_freqs = [50], q = 30, plot_response = Fa
 
         # Optional: plot frequency and phase response
         if plot_response:
-            w, h = freqz(b_notch, a_notch, fs = fs)
+            w, h = freqz(b_notch, a_notch, fs=fs)
             plt.figure(figsize=(12, 4))
             plt.subplot(1, 2, 1)
-            plt.plot(w, 20 * np.log10(abs(h)), label=f'{f_notch} Hz')
-            plt.axvline(f_notch, color='r', linestyle='--')
-            plt.title(f'Magnitude Response - Notch @ {f_notch} Hz')
-            plt.xlabel('Frequency (Hz)')
-            plt.ylabel('Magnitude (dB)')
+            plt.plot(w, 20 * np.log10(abs(h)), label=f"{f_notch} Hz")
+            plt.axvline(f_notch, color="r", linestyle="--")
+            plt.title(f"Magnitude Response - Notch @ {f_notch} Hz")
+            plt.xlabel("Frequency (Hz)")
+            plt.ylabel("Magnitude (dB)")
             plt.grid(True)
 
             plt.subplot(1, 2, 2)
-            plt.plot(w, np.unwrap(np.angle(h)), label=f'{f_notch} Hz')
-            plt.axvline(f_notch, color='r', linestyle='--')
-            plt.title(f'Phase Response - Notch @ {f_notch} Hz')
-            plt.xlabel('Frequency (Hz)')
-            plt.ylabel('Phase (radians)')
+            plt.plot(w, np.unwrap(np.angle(h)), label=f"{f_notch} Hz")
+            plt.axvline(f_notch, color="r", linestyle="--")
+            plt.title(f"Phase Response - Notch @ {f_notch} Hz")
+            plt.xlabel("Frequency (Hz)")
+            plt.ylabel("Phase (radians)")
             plt.grid(True)
 
             plt.tight_layout()
@@ -240,14 +242,14 @@ def ft_preproc_notch(dat, fs, powerline_freqs = [50], q = 30, plot_response = Fa
         if notch_filt_data.ndim == 1:
             notch_filt_data = filtfilt(b_notch, a_notch, notch_filt_data)
         else:
-            notch_filt_data = np.vstack([
-                filtfilt(b_notch, a_notch, ch) for ch in notch_filt_data
-            ])
+            notch_filt_data = np.vstack(
+                [filtfilt(b_notch, a_notch, ch) for ch in notch_filt_data]
+            )
 
     return notch_filt_data
 
 
-def ft_preproc_adaptivefilter(dat, fs, powerline_freq = 50, mu=0.001):
+def ft_preproc_adaptivefilter(dat, fs, powerline_freq=50, mu=0.001):
     """
     Adaptive notch filter based on the LMS algorithm.
     Supports single-channel (1D) or multi-channel (2D: channels x time) input.
@@ -287,10 +289,12 @@ def ft_preproc_adaptivefilter(dat, fs, powerline_freq = 50, mu=0.001):
 
         for k in range(n_samples):
             # Generate reference sinusoidal components
-            ref = np.array([
-                np.sin(2 * np.pi * powerline_freq * k / fs),
-                np.cos(2 * np.pi * powerline_freq * k / fs)
-            ])
+            ref = np.array(
+                [
+                    np.sin(2 * np.pi * powerline_freq * k / fs),
+                    np.cos(2 * np.pi * powerline_freq * k / fs),
+                ]
+            )
 
             # Estimate the noise (harmonic)
             estimated_noise[k] = np.dot(weights, ref)
@@ -307,7 +311,6 @@ def ft_preproc_adaptivefilter(dat, fs, powerline_freq = 50, mu=0.001):
     if is_1d:
         return filtered_dat[0]
     return filtered_dat
-
 
 
 def ft_preproc_adaptivefilter_rls(dat, fs, powerline_freq=50, lambda_=0.998, delta=0.5):
@@ -349,10 +352,12 @@ def ft_preproc_adaptivefilter_rls(dat, fs, powerline_freq=50, lambda_=0.998, del
         t = np.arange(n_samples) / fs
 
         # Reference signals: sin & cos of target frequency
-        X = np.vstack([
-            np.sin(2 * np.pi * powerline_freq * t),
-            np.cos(2 * np.pi * powerline_freq * t)
-        ]).T  # shape: (n_samples, 2)
+        X = np.vstack(
+            [
+                np.sin(2 * np.pi * powerline_freq * t),
+                np.cos(2 * np.pi * powerline_freq * t),
+            ]
+        ).T  # shape: (n_samples, 2)
 
         # RLS initialization
         w = np.zeros(2)  # filter weights [sin, cos]
@@ -372,7 +377,7 @@ def ft_preproc_adaptivefilter_rls(dat, fs, powerline_freq=50, lambda_=0.998, del
             gk = (P @ xk) / denominator
 
             # Update weights and inverse correlation matrix
-            w += (gk.flatten() * ek)
+            w += gk.flatten() * ek
             P = (P - gk @ xk.T @ P) / lambda_
 
             # Store filtered sample
@@ -387,9 +392,9 @@ def ft_preproc_adaptivefilter_rls(dat, fs, powerline_freq=50, lambda_=0.998, del
         return filtered_dat
 
 
-
-
-def calculate_parr(original_signal, filtered_signal, fs, powerline_freq=50, harmonic_n=9, bandwidth=2.0):
+def calculate_parr(
+    original_signal, filtered_signal, fs, powerline_freq=50, harmonic_n=9, bandwidth=2.0
+):
     """
     Calculate Power Attenuation Ratio of Powerline and Harmonics (PARR) in dB.
 
@@ -434,9 +439,14 @@ def calculate_parr(original_signal, filtered_signal, fs, powerline_freq=50, harm
     return parr, harmonic_freqs
 
 
-
-def calculate_ppr_specific_band(original_signal, filtered_signal, fs, target_band=(100, 300),
-                                exclude_harmonics = None, exclude_bw = None):
+def calculate_ppr_specific_band(
+    original_signal,
+    filtered_signal,
+    fs,
+    target_band=(100, 300),
+    exclude_harmonics=None,
+    exclude_bw=None,
+):
     """
     Calculate Power Preservation Ratio (PPR) for a specific frequency band while
     excluding harmonics within that band.
@@ -465,7 +475,9 @@ def calculate_ppr_specific_band(original_signal, filtered_signal, fs, target_ban
     if exclude_harmonics is not None and exclude_bw is not None:
         for harmonic in exclude_harmonics:
             if target_band[0] <= harmonic <= target_band[1]:
-                mask &= ~((f >= harmonic - exclude_bw / 2) & (f <= harmonic + exclude_bw / 2))
+                mask &= ~(
+                    (f >= harmonic - exclude_bw / 2) & (f <= harmonic + exclude_bw / 2)
+                )
 
     # Calculate power in the effective band
     power_orig = np.trapz(Pxx_orig[mask], f[mask])
@@ -495,7 +507,6 @@ def calculate_ppr_specific_band(original_signal, filtered_signal, fs, target_ban
     return ppr, effective_band
 
 
-
 @numba.njit
 def _count_matches(signal, m, r):
     N = len(signal)
@@ -511,21 +522,22 @@ def _count_matches(signal, m, r):
                 count += 1
     return count
 
+
 def calculate_sampen_fast(signal, m=2, r=0.2):
     """
-        Calculate Sample Entropy (SampEn) of a time series.
+    Calculate Sample Entropy (SampEn) of a time series.
 
-        Sample Entropy is a measure of time series regularity that is similar to approximate entropy
-        but has better consistency over varying signal lengths.
+    Sample Entropy is a measure of time series regularity that is similar to approximate entropy
+    but has better consistency over varying signal lengths.
 
-        Parameters:
-            signal (array): Input time series (1D array).
-            m (int): Template length (typically 2).
-            r (float): Tolerance threshold (typically 0.2*std).
+    Parameters:
+        signal (array): Input time series (1D array).
+        m (int): Template length (typically 2).
+        r (float): Tolerance threshold (typically 0.2*std).
 
-        Returns:
-            sampen (float): Sample entropy value.
-        """
+    Returns:
+        sampen (float): Sample entropy value.
+    """
 
     signal = np.asarray(signal, dtype=np.float64)
     N = len(signal)
@@ -544,25 +556,26 @@ def calculate_sampen_fast(signal, m=2, r=0.2):
         return np.inf
     return -np.log(A / B)
 
+
 def calculate_sampen_avg(signal, window_size=10000, step=1000, m=2, r=0.2):
     """
-            Calculate the average Sample Entropy (SampEn) of a time series.
+    Calculate the average Sample Entropy (SampEn) of a time series.
 
-            Sample Entropy is a measure of time series regularity that is similar to approximate entropy
-            but has better consistency over varying signal lengths.
+    Sample Entropy is a measure of time series regularity that is similar to approximate entropy
+    but has better consistency over varying signal lengths.
 
-            Parameters:
-                signal (array): Input time series (1D array).
-                m (int): Template length (typically 2).
-                r (float): Tolerance threshold (typically 0.2*std).
+    Parameters:
+        signal (array): Input time series (1D array).
+        m (int): Template length (typically 2).
+        r (float): Tolerance threshold (typically 0.2*std).
 
-            Returns:
-                sampen (float): Sample entropy value.
-            """
+    Returns:
+        sampen (float): Sample entropy value.
+    """
 
     sampen_values = []
     for start in range(0, len(signal) - window_size + 1, step):
-        window = signal[start:start + window_size]
+        window = signal[start : start + window_size]
         se = calculate_sampen_fast(window, m, r)
         sampen_values.append(se)
     sampen_values = np.array(sampen_values)
@@ -570,8 +583,7 @@ def calculate_sampen_avg(signal, window_size=10000, step=1000, m=2, r=0.2):
     return avg_sampen
 
 
-
-'''
+"""
 def compare_psd(raw_signal, filtered_signal, fs, Powerline_freq = [50], nperseg=2048):
 
     f_raw, psd_raw = welch(raw_signal, fs, nperseg=nperseg)
@@ -595,4 +607,4 @@ def shape_similarity(x_raw, x_filtered):
     cc = np.corrcoef(x_raw, x_filtered)[0, 1]
     return cc
 
-'''
+"""

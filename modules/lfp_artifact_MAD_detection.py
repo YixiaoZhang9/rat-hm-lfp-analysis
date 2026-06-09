@@ -11,10 +11,11 @@ Modifications:
 - Changed threshold from 6 to 5
 """
 
-from typing import Tuple, List
+from typing import List, Tuple
+
 import numpy as np
+from scipy.ndimage import find_objects, label
 from scipy.stats import median_abs_deviation
-from scipy.ndimage import label, find_objects
 
 
 def mad_artifact_detector(
@@ -150,9 +151,7 @@ def _get_time_intervals_from_bool_array(
         return []
 
 
-def _extend_array_by_window(
-    bool_array: np.ndarray, window_size: int = 0
-) -> np.ndarray:
+def _extend_array_by_window(bool_array: np.ndarray, window_size: int = 0) -> np.ndarray:
     """Extend a boolean array by a window size on each side.
 
     Parameters

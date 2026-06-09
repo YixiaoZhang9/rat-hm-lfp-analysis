@@ -1,7 +1,7 @@
-import os
-import numpy as np
-from pathlib import Path
 import pickle
+from pathlib import Path
+
+import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
@@ -18,7 +18,7 @@ def compute_nrem_ratio(files):
 
         scoring = np.repeat(scoring, 1000)
 
-        mask = (scoring == 3)
+        mask = scoring == 3
 
         total_pos += np.sum(y[mask] >= 0.5)
         total_pts += np.sum(mask)
@@ -26,9 +26,14 @@ def compute_nrem_ratio(files):
     return total_pos / total_pts
 
 
-def segment_generator(files, seg_len=1000, stride=500,
-                      keep_only_positive_segments=False,
-                      neg_keep_prob=0.2, seed=42):
+def segment_generator(
+    files,
+    seg_len=1000,
+    stride=500,
+    keep_only_positive_segments=False,
+    neg_keep_prob=0.2,
+    seed=42,
+):
 
     rng = np.random.default_rng(seed)
 
@@ -65,14 +70,16 @@ def segment_generator(files, seg_len=1000, stride=500,
             yield x_seg[:, None], y_seg[:, None]
 
 
-def make_dataset(files, training, seg_len, stride,
-                 batch_size=16, shuffle_buffer=8192, **gen_kwargs):
+def make_dataset(
+    files, training, seg_len, stride, batch_size=16, shuffle_buffer=8192, **gen_kwargs
+):
 
     x_spec = tf.TensorSpec(shape=(seg_len, 1), dtype=tf.float32)
     y_spec = tf.TensorSpec(shape=(seg_len, 1), dtype=tf.float32)
 
-    ds = tf.data.Dataset.from_generator(lambda: segment_generator(files, seg_len=seg_len, stride=stride, **gen_kwargs),
-        output_signature=(x_spec, y_spec)
+    ds = tf.data.Dataset.from_generator(
+        lambda: segment_generator(files, seg_len=seg_len, stride=stride, **gen_kwargs),
+        output_signature=(x_spec, y_spec),
     )
 
     if training:
@@ -81,6 +88,7 @@ def make_dataset(files, training, seg_len, stride,
 
     ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
     return ds
+
 
 def focal_loss(alpha=0.25, gamma=2.0, epsilon=1e-6):
     def focal_loss_calc(y_true, y_probs):
@@ -91,10 +99,11 @@ def focal_loss(alpha=0.25, gamma=2.0, epsilon=1e-6):
         y_neg = 1.0 - y_pos
 
         p_t = y_pos * y_probs + y_neg * (1.0 - y_probs)
-        a_t = y_pos * alpha   + y_neg * (1.0 - alpha)
+        a_t = y_pos * alpha + y_neg * (1.0 - alpha)
 
         loss = -a_t * tf.pow(1.0 - p_t, gamma) * tf.math.log(p_t)
         return tf.reduce_mean(loss)
+
     return focal_loss_calc
 
 
@@ -103,14 +112,14 @@ project_root = Path.cwd().resolve().parents[1]
 data_root = project_root / "training_data"
 
 train_list = sorted(data_root.glob("trial_00[1-4].npz"))
-val_list   = sorted(data_root.glob("trial_005.npz"))
+val_list = sorted(data_root.glob("trial_005.npz"))
 
 print("Train:", train_list)
 print("Val:", val_list)
 
 
 # Load pretrained model
-best_model_pkl = project_root /"RNN_LSTM"/"model_training"/ "best_model.pkl"
+best_model_pkl = project_root / "RNN_LSTM" / "model_training" / "best_model.pkl"
 
 with open(best_model_pkl, "rb") as f:
     best_model = pickle.load(f)
@@ -118,12 +127,11 @@ threshold = best_model["threshold"]
 distance = best_model["distance"]
 width = best_model["width"]
 
-old_model_path = project_root /"RNN_LSTM"/"model_training"/ best_model["model_file"]
+old_model_path = project_root / "RNN_LSTM" / "model_training" / best_model["model_file"]
 print("Loading model:", old_model_path)
 
 model = keras.models.load_model(old_model_path)
 model.summary()
-
 
 
 # Dataset config
@@ -152,14 +160,28 @@ batch_size = 16
 
 
 # Build dataset
-ds_train = make_dataset(train_list, training=True, seg_len=seg_len, stride=stride, batch_size=batch_size,
-    keep_only_positive_segments=False, neg_keep_prob=0.3)
+ds_train = make_dataset(
+    train_list,
+    training=True,
+    seg_len=seg_len,
+    stride=stride,
+    batch_size=batch_size,
+    keep_only_positive_segments=False,
+    neg_keep_prob=0.3,
+)
 
-ds_val = make_dataset(val_list, training=False, seg_len=seg_len, stride=stride,batch_size=batch_size,
-    keep_only_positive_segments=False,neg_keep_prob=1.0)
+ds_val = make_dataset(
+    val_list,
+    training=False,
+    seg_len=seg_len,
+    stride=stride,
+    batch_size=batch_size,
+    keep_only_positive_segments=False,
+    neg_keep_prob=1.0,
+)
 
-train_ratio =  compute_nrem_ratio(train_list)
-val_ratio =  compute_nrem_ratio(val_list)
+train_ratio = compute_nrem_ratio(train_list)
+val_ratio = compute_nrem_ratio(val_list)
 
 print(f"[Train ratio] {train_ratio:.6f}")
 print(f"[Val ratio]   {val_ratio:.6f}")
@@ -172,26 +194,23 @@ lr = 1e-4
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=lr),
     loss=focal_loss(alpha=0.5, gamma=2),
-    metrics=[
-        keras.metrics.AUC(name="pr_auc", curve="PR")
-    ]
+    metrics=[keras.metrics.AUC(name="pr_auc", curve="PR")],
 )
 
 
 # Callbacks
 callbacks = [
     keras.callbacks.ModelCheckpoint(
-        filepath=str(project_root /"RNN_LSTM"/"model_training"/ "retrained_model.h5"),
+        filepath=str(
+            project_root / "RNN_LSTM" / "model_training" / "retrained_model.h5"
+        ),
         monitor="val_pr_auc",
         mode="max",
-        save_best_only=True
+        save_best_only=True,
     ),
     keras.callbacks.EarlyStopping(
-        monitor="val_pr_auc",
-        mode="max",
-        patience=5,
-        restore_best_weights=True
-    )
+        monitor="val_pr_auc", mode="max", patience=5, restore_best_weights=True
+    ),
 ]
 
 
@@ -203,14 +222,13 @@ history = model.fit(
     epochs=epochs,
     steps_per_epoch=1000,
     callbacks=callbacks,
-    verbose=1
+    verbose=1,
 )
 
 
 # Save model
-best_model_path = project_root /"RNN_LSTM"/"model_training"/ "retrained_model.h5"
+best_model_path = project_root / "RNN_LSTM" / "model_training" / "retrained_model.h5"
 model.save(best_model_path)
 
 print("Saved:", best_model_path)
 print("Done.")
-

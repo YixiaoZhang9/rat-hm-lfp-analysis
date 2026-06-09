@@ -1,26 +1,23 @@
-import sys                                      # + path to fastai in root repo directory.
-sys.path.insert(1, '../')
+import sys  # + path to fastai in root repo directory.
+
+sys.path.insert(1, "../")
 import os
-import pandas as pd
-import numpy as np
-from pathlib import Path
-import matplotlib.pyplot as plt
-import math
-import scipy
-from scipy.signal import hilbert
-from scipy.ndimage import gaussian_filter,zoom
-from scipy.stats import zscore
-from mne.time_frequency import tfr_array_stockwell\
-#https://mne.tools/stable/generated/mne.time_frequency.tfr_array_stockwell.html#mne.time_frequency.tfr_array_stockwell
-from PIL import Image
+
 import matplotlib.cm as cm
-from scipy.ndimage import gaussian_filter
-
-
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, models
+from mne.time_frequency import tfr_array_stockwell
+
+# https://mne.tools/stable/generated/mne.time_frequency.tfr_array_stockwell.html#mne.time_frequency.tfr_array_stockwell
+from PIL import Image
+from scipy.ndimage import gaussian_filter
+from scipy.signal import hilbert
+from scipy.stats import zscore
+from torch.utils.data import DataLoader, Dataset
+from torchvision import models, transforms
 
 
 def load_npz_trial(file):
@@ -36,8 +33,7 @@ def load_npz_trial(file):
     offset = np.asarray(ripple_info["offset"])
     ripple_frequency = ripple_info["frequency"]
 
-
-    #detect the peaks of true ripples
+    # detect the peaks of true ripples
     ripple_onset = np.round(onset * fs).astype(int)
     ripple_offset = np.round(offset * fs).astype(int)
     envelope = np.abs(hilbert(pre_lfp))
@@ -59,9 +55,12 @@ def load_npz_trial(file):
     # normalization
     lfp = np.asarray(pre_lfp).reshape(-1)
     lfp_norm = zscore(lfp)
-    return lfp_norm, true_ripple, ripple_peaks, fs,ripple_frequency
+    return lfp_norm, true_ripple, ripple_peaks, fs, ripple_frequency
 
-def stockwell_transform(segment, fs, fmin=100, fmax=250, width=1.0, decim=1, log_power=True, smooth_sigma = 1 ):
+
+def stockwell_transform(
+    segment, fs, fmin=100, fmax=250, width=1.0, decim=1, log_power=True, smooth_sigma=1
+):
     """
     Compute Stockwell time-frequency image for one LFP segment.
 
@@ -77,10 +76,12 @@ def stockwell_transform(segment, fs, fmin=100, fmax=250, width=1.0, decim=1, log
     Output:
         s_transform_44 : 2D float32 array, Resized time-frequency image
         freqs : 1D array, Frequency axis
-        """
+    """
     x = np.asarray(segment, dtype=np.float32)[None, None, :]  # (1, 1, n_times)
 
-    power,_,freqs = tfr_array_stockwell(x,fs,fmin=fmin,fmax=fmax,n_fft=None,width=width,decim=decim,n_jobs=1)
+    power, _, freqs = tfr_array_stockwell(
+        x, fs, fmin=fmin, fmax=fmax, n_fft=None, width=width, decim=decim, n_jobs=1
+    )
 
     # power shape: (n_epochs, n_freqs, n_times)
     # s_transform = np.abs(tfr_results[0]).squeeze())  # (n_freqs, n_times)
@@ -88,7 +89,9 @@ def stockwell_transform(segment, fs, fmin=100, fmax=250, width=1.0, decim=1, log
     # freqs = tfr_results[2]
 
     s_transform = power[0]  # (n_freqs, n_times)
-    s_transform = s_transform.T.astype(np.float32) # (n_times, n_freqs), the input in the paper is times bins* frequency bins
+    s_transform = s_transform.T.astype(
+        np.float32
+    )  # (n_times, n_freqs), the input in the paper is times bins* frequency bins
 
     # optional smoothing
     if smooth_sigma is not None and smooth_sigma > 0:
@@ -96,7 +99,7 @@ def stockwell_transform(segment, fs, fmin=100, fmax=250, width=1.0, decim=1, log
 
     # apply log transition for CNN input
     if log_power:
-        s_transform = np.log10(s_transform+ 1e-12)
+        s_transform = np.log10(s_transform + 1e-12)
     raw_s_transform = s_transform.copy()
 
     # Normalize to [0, 1] for colormap
@@ -111,8 +114,21 @@ def stockwell_transform(segment, fs, fmin=100, fmax=250, width=1.0, decim=1, log
 
     return img_rgb, freqs
 
-def make_spectra_image_files(data, time, out_dir, fs, segment_ms, overlap, f_min = 100, f_max = 250,
-                             width = 1.0, decim = 1, log_power = True, smooth_sigma = 1):
+
+def make_spectra_image_files(
+    data,
+    time,
+    out_dir,
+    fs,
+    segment_ms,
+    overlap,
+    f_min=100,
+    f_max=250,
+    width=1.0,
+    decim=1,
+    log_power=True,
+    smooth_sigma=1,
+):
     """
     Given 1D signal data and time vector, compute Stockwell TF image for each segment,
     save each image to disk, and return start/stop time dictionaries.
@@ -144,7 +160,7 @@ def make_spectra_image_files(data, time, out_dir, fs, segment_ms, overlap, f_min
             Mapping from filename to segment start time
         stop_time_dict : dict
             Mapping from filename to segment stop time
-        """
+    """
     data = np.asarray(data).squeeze()
     time = np.asarray(time).squeeze()
     os.makedirs(out_dir, exist_ok=True)
@@ -165,8 +181,16 @@ def make_spectra_image_files(data, time, out_dir, fs, segment_ms, overlap, f_min
 
         segment = data[i_start:i_stop].astype(np.float32)
 
-        img_rgb, freqs = stockwell_transform(segment=segment,fs=fs,fmin=f_min,fmax=f_max,width=width,decim=decim,
-                                             log_power=log_power,smooth_sigma=smooth_sigma)
+        img_rgb, freqs = stockwell_transform(
+            segment=segment,
+            fs=fs,
+            fmin=f_min,
+            fmax=f_max,
+            width=width,
+            decim=decim,
+            log_power=log_power,
+            smooth_sigma=smooth_sigma,
+        )
 
         filename = f"img_{counter:03d}.jpg"
         filepath = os.path.join(out_dir, filename)
@@ -181,6 +205,7 @@ def make_spectra_image_files(data, time, out_dir, fs, segment_ms, overlap, f_min
         counter += 1
 
     return start_time_dict, stop_time_dict
+
 
 class TestImageDataset(Dataset):
     # dataset for test images without labels
@@ -216,11 +241,13 @@ def build_test_dataloader(path, batch_size=8, sz=44):
     imagenet_mean = [0.485, 0.456, 0.406]
     imagenet_std = [0.229, 0.224, 0.225]
 
-    test_tfms = transforms.Compose([
-        transforms.Resize((sz, sz)),
-        transforms.ToTensor(),
-        transforms.Normalize(imagenet_mean, imagenet_std),
-    ])
+    test_tfms = transforms.Compose(
+        [
+            transforms.Resize((sz, sz)),
+            transforms.ToTensor(),
+            transforms.Normalize(imagenet_mean, imagenet_std),
+        ]
+    )
 
     test_ds = TestImageDataset(path, transform=test_tfms)
     test_dl = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
@@ -228,8 +255,12 @@ def build_test_dataloader(path, batch_size=8, sz=44):
     return test_ds, test_dl
 
 
-
-def compute_CNN(image_path, start_time_dict, stop_time_dict, model_path="../demo_training_saved_model.pth"):
+def compute_CNN(
+    image_path,
+    start_time_dict,
+    stop_time_dict,
+    model_path="../demo_training_saved_model.pth",
+):
     # using resnet architecture
     # arch = resnet34
 
@@ -241,7 +272,9 @@ def compute_CNN(image_path, start_time_dict, stop_time_dict, model_path="../demo
     test_ds, test_dl = build_test_dataloader(image_path, batch_size=8, sz=sz)
 
     # load in pretrained
-    state = torch.load(model_path, map_location=device)  # remove map_location parameter if on GPU
+    state = torch.load(
+        model_path, map_location=device
+    )  # remove map_location parameter if on GPU
     # build PyTorch resnet34 model
     model = models.resnet34(pretrained=False)
     model.fc = nn.Linear(model.fc.in_features, 2)

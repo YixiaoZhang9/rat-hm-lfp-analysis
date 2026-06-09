@@ -1,33 +1,31 @@
 import os
-import copy
-import numpy as np
-import pandas as pd
-from PIL import Image
 
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torchvision import datasets, transforms, models
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from torchvision import datasets, models, transforms
 
 
 def check_image_count(IMAGE_PATH):
     # avoid having a minibatch of size 1 (normalization issues later on)
-    train_yes_path = IMAGE_PATH /"train"/"yes"
-    train_no_path = IMAGE_PATH /"train"/"no"
-    valid_yes_path = IMAGE_PATH /"val"/"yes"
-    valid_no_path = IMAGE_PATH /"val"/"no"
+    train_yes_path = IMAGE_PATH / "train" / "yes"
+    train_no_path = IMAGE_PATH / "train" / "no"
+    valid_yes_path = IMAGE_PATH / "val" / "yes"
+    valid_no_path = IMAGE_PATH / "val" / "no"
 
     if len([name for name in os.listdir(train_yes_path) if ".jpg" in name]) % 8 == 1:
-        rname = train_yes_path/os.listdir(train_yes_path)[0]
+        rname = train_yes_path / os.listdir(train_yes_path)[0]
         os.remove(rname)
     if len([name for name in os.listdir(train_no_path) if ".jpg" in name]) % 8 == 1:
-        rname = train_no_path/os.listdir(train_no_path)[0]
+        rname = train_no_path / os.listdir(train_no_path)[0]
         os.remove(rname)
     if len([name for name in os.listdir(valid_yes_path) if ".jpg" in name]) % 8 == 1:
-        rname = valid_yes_path/os.listdir(valid_yes_path)[0]
+        rname = valid_yes_path / os.listdir(valid_yes_path)[0]
         os.remove(rname)
     if len([name for name in os.listdir(valid_no_path) if ".jpg" in name]) % 8 == 1:
-        rname = valid_no_path/os.listdir(valid_no_path)[0]
+        rname = valid_no_path / os.listdir(valid_no_path)[0]
         os.remove(rname)
 
 
@@ -99,22 +97,28 @@ def get_the_data(NEWPATH, arch, batch_size=8):
     imagenet_std = [0.229, 0.224, 0.225]
 
     # flip vertically to artificially create more training data
-    train_tfms = transforms.Compose([
-        transforms.Resize((sz, sz)),
-        transforms.RandomVerticalFlip(p=0.5),
-        transforms.RandomAffine(degrees=1, scale=(1.0, 1.2)),
-        transforms.ToTensor(),
-        transforms.Normalize(imagenet_mean, imagenet_std),
-    ])
+    train_tfms = transforms.Compose(
+        [
+            transforms.Resize((sz, sz)),
+            transforms.RandomVerticalFlip(p=0.5),
+            transforms.RandomAffine(degrees=1, scale=(1.0, 1.2)),
+            transforms.ToTensor(),
+            transforms.Normalize(imagenet_mean, imagenet_std),
+        ]
+    )
 
-    valid_tfms = transforms.Compose([
-        transforms.Resize((sz, sz)),
-        transforms.ToTensor(),
-        transforms.Normalize(imagenet_mean, imagenet_std),
-    ])
+    valid_tfms = transforms.Compose(
+        [
+            transforms.Resize((sz, sz)),
+            transforms.ToTensor(),
+            transforms.Normalize(imagenet_mean, imagenet_std),
+        ]
+    )
 
     # get data from path with transforms, batch size 8, test data in 'test' folder
-    train_ds = datasets.ImageFolder(os.path.join(NEWPATH, "train"), transform=train_tfms)
+    train_ds = datasets.ImageFolder(
+        os.path.join(NEWPATH, "train"), transform=train_tfms
+    )
     valid_ds = datasets.ImageFolder(os.path.join(NEWPATH, "val"), transform=valid_tfms)
 
     test_dir = os.path.join(NEWPATH, "test")
@@ -124,8 +128,18 @@ def get_the_data(NEWPATH, arch, batch_size=8):
     valid_dl = DataLoader(valid_ds, batch_size=batch_size, shuffle=False, num_workers=2)
     test_dl = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
 
-    data = {"train_ds": train_ds,"val_ds": valid_ds,"test_ds": test_ds,"train_dl": train_dl,"val_dl": valid_dl,"test_dl": test_dl,
-        "class_names": train_ds.classes,"class_to_idx": train_ds.class_to_idx,"batch_size": batch_size,"image_size": sz}
+    data = {
+        "train_ds": train_ds,
+        "val_ds": valid_ds,
+        "test_ds": test_ds,
+        "train_dl": train_dl,
+        "val_dl": valid_dl,
+        "test_dl": test_dl,
+        "class_names": train_ds.classes,
+        "class_to_idx": train_ds.class_to_idx,
+        "batch_size": batch_size,
+        "image_size": sz,
+    }
 
     return data
 
@@ -205,7 +219,12 @@ def run_one_epoch(model, dataloader, criterion, optimizer, device, train=True):
     return epoch_loss, epoch_acc
 
 
-def train_the_model(data, arch, filename, old_weight_path=None,):
+def train_the_model(
+    data,
+    arch,
+    filename,
+    old_weight_path=None,
+):
     # train the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_classes = len(data["class_names"])
@@ -222,48 +241,71 @@ def train_the_model(data, arch, filename, old_weight_path=None,):
 
     # stage 1: train classifier head
     freeze_backbone(model)
-    optimizer = torch.optim.AdamW(model.fc.parameters(), lr=1e-3 , weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.fc.parameters(), lr=1e-3, weight_decay=1e-4)
 
     for epoch in range(5):
-        train_loss, train_acc = run_one_epoch(model, data["train_dl"], criterion, optimizer, device, train=True)
-        valid_loss, valid_acc = run_one_epoch(model, data["val_dl"], criterion, optimizer, device, train=False)
-        print( f"Stage 1/3 - epoch {epoch + 1}/5 - train_loss: {train_loss:.4f} train_acc: {train_acc:.4f} valid_loss: {valid_loss:.4f} valid_acc: {valid_acc:.4f}")
+        train_loss, train_acc = run_one_epoch(
+            model, data["train_dl"], criterion, optimizer, device, train=True
+        )
+        valid_loss, valid_acc = run_one_epoch(
+            model, data["val_dl"], criterion, optimizer, device, train=False
+        )
+        print(
+            f"Stage 1/3 - epoch {epoch + 1}/5 - train_loss: {train_loss:.4f} train_acc: {train_acc:.4f} valid_loss: {valid_loss:.4f} valid_acc: {valid_acc:.4f}"
+        )
 
     # stage 2: unfreeze layer4
     for p in model.layer4.parameters():
         p.requires_grad = True
 
-    optimizer = torch.optim.AdamW([
-        {"params": model.layer4.parameters(), "lr": 1e-4},
-        {"params": model.fc.parameters(), "lr": 5e-4},
-    ], weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": model.layer4.parameters(), "lr": 1e-4},
+            {"params": model.fc.parameters(), "lr": 5e-4},
+        ],
+        weight_decay=1e-4,
+    )
 
     for epoch in range(5):
-        train_loss, train_acc = run_one_epoch(model, data["train_dl"], criterion, optimizer, device, train=True)
-        valid_loss, valid_acc = run_one_epoch(model, data["val_dl"], criterion, optimizer, device, train=False)
+        train_loss, train_acc = run_one_epoch(
+            model, data["train_dl"], criterion, optimizer, device, train=True
+        )
+        valid_loss, valid_acc = run_one_epoch(
+            model, data["val_dl"], criterion, optimizer, device, train=False
+        )
         print(
-            f"Stage 2/3 - epoch {epoch + 1}/5 - train_loss: {train_loss:.4f} train_acc: {train_acc:.4f} valid_loss: {valid_loss:.4f} valid_acc: {valid_acc:.4f}")
+            f"Stage 2/3 - epoch {epoch + 1}/5 - train_loss: {train_loss:.4f} train_acc: {train_acc:.4f} valid_loss: {valid_loss:.4f} valid_acc: {valid_acc:.4f}"
+        )
 
     # stage 3: fine-tune the whole network
     unfreeze_all(model)
 
-    optimizer = torch.optim.AdamW([
-        {"params": model.conv1.parameters(), "lr": 1e-6},
-        {"params": model.bn1.parameters(), "lr": 1e-6},
-        {"params": model.layer1.parameters(), "lr": 1e-6},
-        {"params": model.layer2.parameters(), "lr": 5e-6},
-        {"params": model.layer3.parameters(), "lr": 1e-5},
-        {"params": model.layer4.parameters(), "lr": 5e-5},
-        {"params": model.fc.parameters(), "lr": 1e-3},
-    ], weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": model.conv1.parameters(), "lr": 1e-6},
+            {"params": model.bn1.parameters(), "lr": 1e-6},
+            {"params": model.layer1.parameters(), "lr": 1e-6},
+            {"params": model.layer2.parameters(), "lr": 5e-6},
+            {"params": model.layer3.parameters(), "lr": 1e-5},
+            {"params": model.layer4.parameters(), "lr": 5e-5},
+            {"params": model.fc.parameters(), "lr": 1e-3},
+        ],
+        weight_decay=1e-4,
+    )
 
     cb = EarlyStopping(save_path="best_mod.pth", patience=3)
 
     for epoch in range(5):
-        train_loss, train_acc = run_one_epoch(model, data["train_dl"], criterion, optimizer, device, train=True)
-        valid_loss, valid_acc = run_one_epoch(model, data["val_dl"], criterion, optimizer, device, train=False)
+        train_loss, train_acc = run_one_epoch(
+            model, data["train_dl"], criterion, optimizer, device, train=True
+        )
+        valid_loss, valid_acc = run_one_epoch(
+            model, data["val_dl"], criterion, optimizer, device, train=False
+        )
 
-        print(f"Stage 3/3 - epoch {epoch + 1}/5- train_loss: {train_loss:.4f} train_acc: {train_acc:.4f} valid_loss: {valid_loss:.4f} valid_acc: {valid_acc:.4f}")
+        print(
+            f"Stage 3/3 - epoch {epoch + 1}/5- train_loss: {train_loss:.4f} train_acc: {train_acc:.4f} valid_loss: {valid_loss:.4f} valid_acc: {valid_acc:.4f}"
+        )
 
         cb.step(model, valid_loss)
         if cb.should_stop:
@@ -275,7 +317,7 @@ def train_the_model(data, arch, filename, old_weight_path=None,):
     return model
 
 
-def test_the_model(data, arch,filename):
+def test_the_model(data, arch, filename):
     # load in pretrained
     print("Using pretrained model " + filename)
 
@@ -283,7 +325,9 @@ def test_the_model(data, arch,filename):
     num_classes = len(data["class_names"])
 
     model = build_model(arch, num_classes)
-    state = torch.load(filename, map_location=device)  # remove map_location parameter if on GPU
+    state = torch.load(
+        filename, map_location=device
+    )  # remove map_location parameter if on GPU
     model.load_state_dict(state)
     model = model.to(device)
     model.eval()
@@ -315,6 +359,7 @@ def test_the_model(data, arch,filename):
 
     return test_df
 
+
 def convert_old_fastai_resnet34_state_dict(old_sd):
     # convert old fastai sequential-style keys to torchvision resnet34 keys
     new_sd = {}
@@ -339,6 +384,7 @@ def convert_old_fastai_resnet34_state_dict(old_sd):
         new_sd[new_key] = value
 
     return new_sd
+
 
 def load_old_fastai_backbone_weights(model, old_weight_path, device):
     # load backbone weights from old fastai model into torchvision resnet34

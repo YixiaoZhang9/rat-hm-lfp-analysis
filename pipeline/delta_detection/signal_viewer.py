@@ -1,20 +1,23 @@
-import sys
 import numpy as np
-
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QSlider, QPushButton
-)
-from PyQt5.QtCore import Qt
-
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 from scipy.signal import butter, sosfiltfilt
 
+
 def filter_lfp(lfp, fs, band):
-    sos = butter(4,band, btype='band',fs=fs,output='sos')
+    sos = butter(4, band, btype="band", fs=fs, output="sos")
     return sosfiltfilt(sos, lfp)
+
 
 class DeltaViewer(QWidget):
     """
@@ -60,7 +63,6 @@ class DeltaViewer(QWidget):
 
         self.init_ui()
 
-
     # =========================
     # UI SETUP
     # =========================
@@ -83,7 +85,7 @@ class DeltaViewer(QWidget):
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setMinimum(0)
-        self.slider.setMaximum(int(len(self.lfp)/self.fs - self.window_sec))
+        self.slider.setMaximum(int(len(self.lfp) / self.fs - self.window_sec))
         self.slider.valueChanged.connect(self.update_plot)
 
         control_layout.addWidget(QLabel("Time (s)"))
@@ -114,13 +116,10 @@ class DeltaViewer(QWidget):
 
         for i, method in enumerate(self.event_sets.keys()):
             color = self.method_colors.get(
-                method,
-                self.default_colors[i % len(self.default_colors)]
+                method, self.default_colors[i % len(self.default_colors)]
             )
 
-            delta_legend.append(
-                Line2D([0], [0], color=color, lw=3, label=method)
-            )
+            delta_legend.append(Line2D([0], [0], color=color, lw=3, label=method))
 
         sleep_legend = [
             Line2D([0], [0], color="#8090C0", lw=6, alpha=0.3, label="NREM"),
@@ -129,17 +128,21 @@ class DeltaViewer(QWidget):
             Line2D([0], [0], color="#B0B0B0", lw=6, alpha=0.3, label="Intermediate"),
         ]
 
-        self.fig.legend(handles=delta_legend,
-                        loc="upper right",
-                        bbox_to_anchor=(0.98, 0.98),
-                        title="Delta Detection",
-                        fontsize=11)
+        self.fig.legend(
+            handles=delta_legend,
+            loc="upper right",
+            bbox_to_anchor=(0.98, 0.98),
+            title="Delta Detection",
+            fontsize=11,
+        )
 
-        self.fig.legend(handles=sleep_legend,
-                        loc="upper right",
-                        bbox_to_anchor=(0.98, 0.75),
-                        title="Sleep Stage",
-                        fontsize=11)
+        self.fig.legend(
+            handles=sleep_legend,
+            loc="upper right",
+            bbox_to_anchor=(0.98, 0.75),
+            title="Sleep Stage",
+            fontsize=11,
+        )
 
     # =========================
     # ZOOM
@@ -155,7 +158,7 @@ class DeltaViewer(QWidget):
         self.update_slider()
 
     def update_slider(self):
-        self.slider.setMaximum(max(int(len(self.lfp)/self.fs - self.window_sec), 0))
+        self.slider.setMaximum(max(int(len(self.lfp) / self.fs - self.window_sec), 0))
         self.update_plot()
 
     # =========================
@@ -177,7 +180,9 @@ class DeltaViewer(QWidget):
         self.ax_raw.plot(t, self.lfp[start:end], color="#5B5F97", linewidth=1.2)
         self.ax_raw.set_ylabel("0.3_30_Hz_filtered_signal", fontsize=13)
 
-        self.ax_filtered.plot(t, self.filtered[start:end], color="#C06C84", linewidth=1.2)
+        self.ax_filtered.plot(
+            t, self.filtered[start:end], color="#C06C84", linewidth=1.2
+        )
         self.ax_filtered.set_ylabel("0.5_4_Hz_filtered_signal", fontsize=13)
 
         # --- Sleep background ---
@@ -205,16 +210,10 @@ class DeltaViewer(QWidget):
 
         scoring_full = np.repeat(self.scoring, self.fs)
 
-        colors = {
-            1: "#A0C080",
-            3: "#8090C0",
-            4: "#B0B0B0",
-            5: "#C080A0"
-        }
+        colors = {1: "#A0C080", 3: "#8090C0", 4: "#B0B0B0", 5: "#C080A0"}
 
         for state, color in colors.items():
-
-            mask = (scoring_full[start:end] == state)
+            mask = scoring_full[start:end] == state
             if not np.any(mask):
                 continue
 
@@ -243,7 +242,7 @@ class DeltaViewer(QWidget):
 
         # three layers
 
-        self.ax_raw.set_ylim(y_min, y_max + 0.3*height)
+        self.ax_raw.set_ylim(y_min, y_max + 0.3 * height)
 
     def _draw_bars(self, events, start, end, y, color):
 
@@ -252,11 +251,7 @@ class DeltaViewer(QWidget):
                 continue
 
             self.ax_raw.hlines(
-                y=y,
-                xmin=s/self.fs,
-                xmax=e/self.fs,
-                colors=color,
-                linewidth=5
+                y=y, xmin=s / self.fs, xmax=e / self.fs, colors=color, linewidth=5
             )
 
     def plot_deltas(self, start, end):
@@ -270,8 +265,7 @@ class DeltaViewer(QWidget):
 
         for i, (method, events) in enumerate(self.event_sets.items()):
             color = self.method_colors.get(
-                method,
-                self.default_colors[i % len(self.default_colors)]
+                method, self.default_colors[i % len(self.default_colors)]
             )
 
             y = base_y + i * spacing

@@ -1,12 +1,13 @@
-import numpy as np
 from pathlib import Path
-from scipy.signal import hilbert,convolve
-from scipy.ndimage import gaussian_filter
-from scipy.stats import zscore
+
+import matplotlib.cm as cm
+import numpy as np
 from mne.time_frequency import tfr_array_stockwell
 from PIL import Image
-import matplotlib.cm as cm
+from scipy.ndimage import gaussian_filter
+from scipy.signal import convolve, hilbert
 from scipy.signal.windows import gaussian
+from scipy.stats import zscore
 
 
 def smooth_signal(signal, fs, sigma):
@@ -16,13 +17,14 @@ def smooth_signal(signal, fs, sigma):
     # Create a Gaussian window with a standard deviation
     window_size = smoothing_sigma * 3 * 2
     # in a Gaussian distribution, about 99.7 % of the distribution's area lies within ±3σ.
-    std = (window_size-1)/(2*sigma)
+    std = (window_size - 1) / (2 * sigma)
     gauss_filter = gaussian(window_size, std)
     # Normalize the Gaussian filter
     gauss_filter = gauss_filter / sum(gauss_filter)
     # Apply the filter using convolution
-    smoothed_lfp = convolve(signal, gauss_filter, 'same')
+    smoothed_lfp = convolve(signal, gauss_filter, "same")
     return smoothed_lfp
+
 
 def load_npz_trial(file):
     """
@@ -80,9 +82,9 @@ def compute_ripple_peaks(lfp, ripple_regions):
     return np.array(peaks)
 
 
-def sample_negative_centers(signal_len, positive_centers,
-                            window_len, n_neg, fs,
-                            exclusion_ms=1000):
+def sample_negative_centers(
+    signal_len, positive_centers, window_len, n_neg, fs, exclusion_ms=1000
+):
     """
     Sample negative centers away from ripple peaks.
     """
@@ -113,12 +115,7 @@ def stockwell_transform(segment, fs):
     x = segment[None, None, :]
 
     power, _, _ = tfr_array_stockwell(
-        x,
-        sfreq=fs,
-        fmin=f_min,
-        fmax=f_max,
-        width=1.0,
-        n_jobs=1
+        x, sfreq=fs, fmin=f_min, fmax=f_max, width=1.0, n_jobs=1
     )
 
     tf = power[0].T.astype(np.float32)
@@ -163,21 +160,16 @@ def generate_dataset(file_list, split="train"):
         lfp, y, scoring = load_npz_trial(file)
 
         # only NREM segments
-        nrem_mask = (scoring == 3)
+        nrem_mask = scoring == 3
 
         ripple_regions = extract_ripple_regions(y)
 
-        ripple_regions = [
-            (s, e) for s, e in ripple_regions
-            if np.all(nrem_mask[s:e])
-        ]
-
+        ripple_regions = [(s, e) for s, e in ripple_regions if np.all(nrem_mask[s:e])]
 
         ripple_peaks = compute_ripple_peaks(lfp, ripple_regions)
         n_pos_per_trial = 0
         # positive samples
         for i, center in enumerate(ripple_peaks):
-
             if center < half_len or center >= len(lfp) - half_len:
                 continue
 
@@ -199,11 +191,7 @@ def generate_dataset(file_list, split="train"):
 
         # negative samples
         neg_centers = sample_negative_centers(
-            len(lfp),
-            ripple_peaks,
-            window_len,
-            n_neg = n_pos_per_trial,
-            fs = fs
+            len(lfp), ripple_peaks, window_len, n_neg=n_pos_per_trial, fs=fs
         )
 
         for center in neg_centers:
@@ -222,12 +210,11 @@ def generate_dataset(file_list, split="train"):
         print(f"Saved: {pos_count} pos, {neg_count} neg")
 
 
-
 # configuration
 
 fs = 1000
-window_ms = 400          # window size for CNN
-jitter_ms = 100          # jitter for positive samples
+window_ms = 400  # window size for CNN
+jitter_ms = 100  # jitter for positive samples
 
 f_min = 100
 f_max = 250
@@ -239,7 +226,7 @@ project_root = Path.cwd().resolve().parents[1]
 data_root = project_root / "training_data"
 
 train_list = sorted(data_root.glob("trial_00[1-4].npz"))
-val_list   = sorted(data_root.glob("trial_005.npz"))
+val_list = sorted(data_root.glob("trial_005.npz"))
 
 generate_dataset(train_list, split="train")
 generate_dataset(val_list, split="val")

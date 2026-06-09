@@ -2,25 +2,24 @@
 
 import os
 import re
-import pandas as pd
+
 import matplotlib
 import numpy as np
-from scipy.signal import butter, filtfilt, resample, freqz, hilbert
-from scipy.interpolate import interp1d, CubicSpline
-matplotlib.use('Qt5Agg')
-import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import QApplication
-import sys
-from modules.ephys_signal_view import SignalPlotViewer
-from collections import defaultdict
-import modules.powerline_noise_removal as powerline
-import math
-import glob
+from scipy.interpolate import CubicSpline, interp1d
+from scipy.signal import butter, filtfilt, freqz, hilbert, resample
 
-from PyEMD import EEMD
-from sklearn.decomposition import FastICA
+matplotlib.use("Qt5Agg")
+import glob
+import math
+import sys
+from collections import defaultdict
+
+import matplotlib.pyplot as plt
 import pywt
-import seaborn as sns
+from PyQt5.QtWidgets import QApplication
+
+import modules.powerline_noise_removal as powerline
+from modules.ephys_signal_view import SignalPlotViewer
 
 
 def bandpass_filter(data, lowcut=80, highcut=250, fs=1000, order=4):
@@ -28,13 +27,12 @@ def bandpass_filter(data, lowcut=80, highcut=250, fs=1000, order=4):
     nyquist = 0.5 * fs
     low = lowcut / nyquist
     high = highcut / nyquist
-    b, a = butter(order, [low, high], btype='band')
+    b, a = butter(order, [low, high], btype="band")
     y = filtfilt(b, a, data)
     return y
 
 
-
-def downsampling(data, fs, ds_fs, plot_response = False):
+def downsampling(data, fs, ds_fs, plot_response=False):
     """
     Downsample the input data from original sampling rate fs to new sampling rate ds_fs.
 
@@ -48,12 +46,14 @@ def downsampling(data, fs, ds_fs, plot_response = False):
         np.ndarray: Downsampled signal.
     """
     if ds_fs >= fs:
-        raise ValueError("Downsample frequency must be less than original sampling frequency.")
+        raise ValueError(
+            "Downsample frequency must be less than original sampling frequency."
+        )
 
     # Design low-pass filter (Butterworth)
     nyq = fs / 2
     cutoff = ds_fs / 2  # anti-aliasing
-    b, a = butter(N = 4, Wn = cutoff / nyq, btype = 'low')
+    b, a = butter(N=4, Wn=cutoff / nyq, btype="low")
 
     # Optional: plot frequency & phase response
     if plot_response:
@@ -64,21 +64,21 @@ def downsampling(data, fs, ds_fs, plot_response = False):
 
         # Magnitude response
         plt.subplot(1, 2, 1)
-        plt.plot(freqs, 20 * np.log10(abs(h)), 'b')
-        plt.axvline(cutoff, color='r', linestyle='--', label=f'Cutoff = {cutoff} Hz')
-        plt.title('Magnitude Response (dB)')
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Magnitude (dB)')
+        plt.plot(freqs, 20 * np.log10(abs(h)), "b")
+        plt.axvline(cutoff, color="r", linestyle="--", label=f"Cutoff = {cutoff} Hz")
+        plt.title("Magnitude Response (dB)")
+        plt.xlabel("Frequency (Hz)")
+        plt.ylabel("Magnitude (dB)")
         plt.grid(True)
         plt.legend()
 
         # Phase response
         plt.subplot(1, 2, 2)
         angles = np.unwrap(np.angle(h))
-        plt.plot(freqs, angles, 'g')
-        plt.title('Phase Response')
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Phase (radians)')
+        plt.plot(freqs, angles, "g")
+        plt.title("Phase Response")
+        plt.xlabel("Frequency (Hz)")
+        plt.ylabel("Phase (radians)")
         plt.grid(True)
 
         plt.tight_layout()
@@ -102,9 +102,7 @@ def downsampling(data, fs, ds_fs, plot_response = False):
     return downsampled
 
 
-
-
-def powerline_filter(data, fs, powerline_freq,  Method = "Notch", plot_data = False):
+def powerline_filter(data, fs, powerline_freq, Method="Notch", plot_data=False):
     """
     Apply a notch filter to remove powerline noise at a given frequency.
 
@@ -122,30 +120,39 @@ def powerline_filter(data, fs, powerline_freq,  Method = "Notch", plot_data = Fa
         np.ndarray: Filtered signal with powerline interference removed.
     """
 
-    if Method == 'Notch':
-        filt_data = powerline.ft_preproc_notch (data, fs, powerline_freq, plot_response = False)
+    if Method == "Notch":
+        filt_data = powerline.ft_preproc_notch(
+            data, fs, powerline_freq, plot_response=False
+        )
 
-    elif Method == 'DFT':
+    elif Method == "DFT":
         dftbandwidth = [1] * len(np.atleast_1d(powerline_freq))
         dftneighbourwidth = [3] * len(np.atleast_1d(powerline_freq))
         # filt_data = powerline.ft_preproc_dftfilter(data, fs, powerline_freq, 'zero')
-        filt_data = powerline.ft_preproc_dftfilter(data, fs, powerline_freq, 'neighbour',
-                                                         dftbandwidth = dftbandwidth, dftneighbourwidth = dftneighbourwidth)
+        filt_data = powerline.ft_preproc_dftfilter(
+            data,
+            fs,
+            powerline_freq,
+            "neighbour",
+            dftbandwidth=dftbandwidth,
+            dftneighbourwidth=dftneighbourwidth,
+        )
 
-    elif Method == 'Adaptive_LMS':
+    elif Method == "Adaptive_LMS":
         filt_data = data  # Start with the original data
         for harmonic_freq in powerline_freq:
             filt_data = powerline.ft_preproc_adaptivefilter(
-                filt_data, fs, powerline_freq = harmonic_freq  # Wrap in list if needed
+                filt_data,
+                fs,
+                powerline_freq=harmonic_freq,  # Wrap in list if needed
             )
 
-    elif Method == 'Adaptive_RLS':
+    elif Method == "Adaptive_RLS":
         filt_data = data  # Start with the original data
         for harmonic_freq in powerline_freq:
             filt_data = powerline.ft_preproc_adaptivefilter_rls(
-                filt_data, fs, powerline_freq = harmonic_freq, lambda_ = 0.998, delta = 0.5
+                filt_data, fs, powerline_freq=harmonic_freq, lambda_=0.998, delta=0.5
             )
-
 
     # Optional: plot raw data and filterd data
     if plot_data:
@@ -159,10 +166,7 @@ def powerline_filter(data, fs, powerline_freq,  Method = "Notch", plot_data = Fa
         squeezed_filt_data = filt_data.squeeze()
 
         # create dic
-        data_dict = {
-            "Original": squeezed_data,
-            "Filtered": squeezed_filt_data
-        }
+        data_dict = {"Original": squeezed_data, "Filtered": squeezed_filt_data}
 
         window = SignalPlotViewer(data_dict, fs, window_sec=5)
         window.show()
@@ -170,9 +174,8 @@ def powerline_filter(data, fs, powerline_freq,  Method = "Notch", plot_data = Fa
         if app_created:
             app.exec()
 
-        plot_fft(data, fs, title = "Original Signal FFT")
-        plot_fft(filt_data, fs, title = "Filtered Signal FFT")
-
+        plot_fft(data, fs, title="Original Signal FFT")
+        plot_fft(filt_data, fs, title="Filtered Signal FFT")
 
     return filt_data
 
@@ -197,7 +200,7 @@ def plot_fft(signal, sampling_rate, title="FFT Spectrum"):
 
     # plot
     plt.figure(figsize=(10, 4))
-    plt.plot(freqs, fft_vals, label='Magnitude Spectrum')
+    plt.plot(freqs, fft_vals, label="Magnitude Spectrum")
     plt.title(title)
     plt.xlabel("Frequency (Hz)")
     plt.ylabel("Magnitude")
@@ -223,8 +226,8 @@ def group_files(file_list):
         dict: A dictionary where each key is a trial name prefix (str) and the value is a list
               of tuples (suffix_letter, file_path), sorted by suffix_letter. Files without suffix
               letters are grouped by their full filename as keys with empty suffix.
-        """
-    pattern = re.compile(r'^(.*?)([a-z])\.mat$')
+    """
+    pattern = re.compile(r"^(.*?)([a-z])\.mat$")
     grouped = defaultdict(list)
     for f in file_list:
         basename = os.path.basename(f)
@@ -234,7 +237,7 @@ def group_files(file_list):
             suffix = match.group(2)
             grouped[trial_name].append((suffix, f))
         else:
-            grouped[basename].append(('', f))
+            grouped[basename].append(("", f))
 
     for trial_name in grouped:
         grouped[trial_name].sort(key=lambda x: x[0])
@@ -242,7 +245,9 @@ def group_files(file_list):
     return grouped
 
 
-def smooth_transition(arr1, arr2, smooth_points = 50, window_size = 5, plot_comparison=False):
+def smooth_transition(
+    arr1, arr2, smooth_points=50, window_size=5, plot_comparison=False
+):
     """
     Smooth transitions between two 2D signals by applying moving average to
     the specified number of points around the junction.
@@ -274,8 +279,8 @@ def smooth_transition(arr1, arr2, smooth_points = 50, window_size = 5, plot_comp
     # Apply moving average to each channel in the transition region
     for ch in range(arr1.shape[0]):
         # Get the transition region (including some context for smoothing)
-        start_idx = max(0, transition_start - math.ceil(window_size/2))
-        end_idx = min(original.shape[1], transition_end + math.ceil(window_size/2))
+        start_idx = max(0, transition_start - math.ceil(window_size / 2))
+        end_idx = min(original.shape[1], transition_end + math.ceil(window_size / 2))
 
         # Smooth the extended region
         smoothed_region = smooth(original[ch, start_idx:end_idx], window_size)
@@ -283,7 +288,10 @@ def smooth_transition(arr1, arr2, smooth_points = 50, window_size = 5, plot_comp
         # Put back only the actual transition region we wanted to smooth
         put_start = transition_start
         put_end = transition_end
-        smoothed[ch, put_start:put_end] = smoothed_region[math.ceil(window_size/2): math.ceil(window_size/2) + (put_end - put_start)]
+        smoothed[ch, put_start:put_end] = smoothed_region[
+            math.ceil(window_size / 2) : math.ceil(window_size / 2)
+            + (put_end - put_start)
+        ]
 
     # Plot comparison if requested
     if plot_comparison:
@@ -291,18 +299,18 @@ def smooth_transition(arr1, arr2, smooth_points = 50, window_size = 5, plot_comp
 
         # Plot original
         ax1.plot(original.T, alpha=0.7)
-        ax1.set_title('Before Smooth Transition')
-        ax1.axvline(x=arr1.shape[1], color='r', linestyle='--', alpha=0.5)
-        ax1.axvspan(transition_start, transition_end, color='r', alpha=0.1)
-        ax1.set_ylabel('Amplitude')
+        ax1.set_title("Before Smooth Transition")
+        ax1.axvline(x=arr1.shape[1], color="r", linestyle="--", alpha=0.5)
+        ax1.axvspan(transition_start, transition_end, color="r", alpha=0.1)
+        ax1.set_ylabel("Amplitude")
 
         # Plot smoothed
         ax2.plot(smoothed.T, alpha=0.7)
-        ax2.set_title('After Smooth Transition (Moving Average)')
-        ax2.axvline(x=arr1.shape[1], color='g', linestyle='--', alpha=0.5)
-        ax2.axvspan(transition_start, transition_end, color='g', alpha=0.1)
-        ax2.set_xlabel('Time Samples')
-        ax2.set_ylabel('Amplitude')
+        ax2.set_title("After Smooth Transition (Moving Average)")
+        ax2.axvline(x=arr1.shape[1], color="g", linestyle="--", alpha=0.5)
+        ax2.axvspan(transition_start, transition_end, color="g", alpha=0.1)
+        ax2.set_xlabel("Time Samples")
+        ax2.set_ylabel("Amplitude")
 
         plt.tight_layout()
         plt.show()
@@ -322,15 +330,15 @@ def smooth(a, w, head=True, tail=True):
 
     goes to https://stackoverflow.com/a/40443565/2366315
     """
-    assert w % 2 == 1, 'Need odd window size!'
+    assert w % 2 == 1, "Need odd window size!"
     if len(a) < w:
         return a
 
-    smoothed = np.convolve(a, np.ones(w, int), 'valid') / w
+    smoothed = np.convolve(a, np.ones(w, int), "valid") / w
 
     r = np.arange(1, w - 1, 2)
     if head:
-        head = np.cumsum(a[:w - 1])[::2] / r
+        head = np.cumsum(a[: w - 1])[::2] / r
         smoothed = np.r_[head, smoothed]
 
     if tail:
@@ -349,7 +357,9 @@ def get_sorted_mat_files(folder):
     return files
 
 
-def find_artifact_zscore(x, threshold, fs, expand_ms=20, min_duration_ms=40, merge_gap_s=1.0):
+def find_artifact_zscore(
+    x, threshold, fs, expand_ms=20, min_duration_ms=40, merge_gap_s=1.0
+):
     """
     Detect artifact regions using modified Z-score method, with expansion,
     minimum duration filtering, and merging of close regions.
@@ -410,7 +420,9 @@ def find_artifact_zscore(x, threshold, fs, expand_ms=20, min_duration_ms=40, mer
 
     # --- Step 4: Filter out short artifact regions ---
     min_samples = int(min_duration_ms / 1000 * fs)
-    artifact_regions = [(start, end) for start, end in artifact_regions if (end - start) >= min_samples]
+    artifact_regions = [
+        (start, end) for start, end in artifact_regions if (end - start) >= min_samples
+    ]
 
     # --- Step 5: Merge close artifact regions ---
     merged_regions = []
@@ -431,7 +443,9 @@ def find_artifact_zscore(x, threshold, fs, expand_ms=20, min_duration_ms=40, mer
     return merged_regions
 
 
-def remove_artifacts_by_interpolation(x, regions, fs, pad_ms=10, fade_ms=5, interp_kind='cubic'):
+def remove_artifacts_by_interpolation(
+    x, regions, fs, pad_ms=10, fade_ms=5, interp_kind="cubic"
+):
     """
     Remove artifact regions by replacing them with interpolation using neighboring data.
 
@@ -455,7 +469,7 @@ def remove_artifacts_by_interpolation(x, regions, fs, pad_ms=10, fade_ms=5, inte
     pad = max(1, int(pad_ms / 1000 * fs))
     fade = max(1, int(fade_ms / 1000 * fs))
 
-    for (s, e) in regions:
+    for s, e in regions:
         s2 = max(0, s - pad)
         e2 = min(n, e + pad)
 
@@ -476,10 +490,12 @@ def remove_artifacts_by_interpolation(x, regions, fs, pad_ms=10, fade_ms=5, inte
 
             # nonlinear interpolation
             try:
-                if interp_kind == 'cubic':
+                if interp_kind == "cubic":
                     f = CubicSpline(ref_idx, ref_vals)
                 else:
-                    f = interp1d(ref_idx, ref_vals, kind=interp_kind, fill_value="extrapolate")
+                    f = interp1d(
+                        ref_idx, ref_vals, kind=interp_kind, fill_value="extrapolate"
+                    )
                 xi = np.arange(s2, e2)
                 x_clean[s2:e2] = f(xi)
             except Exception:
@@ -494,13 +510,19 @@ def remove_artifacts_by_interpolation(x, regions, fs, pad_ms=10, fade_ms=5, inte
         b = min(e, e2)
         L = min(fade, b - a)
         if L > 0:
-            x_clean[a:a + L] = x_clean[a:a + L] * fade_in[:L] + x[a:a + L] * (1 - fade_in[:L])
-            x_clean[b - L:b] = x_clean[b - L:b] * fade_out[-L:] + x[b - L:b] * (1 - fade_out[-L:])
+            x_clean[a : a + L] = x_clean[a : a + L] * fade_in[:L] + x[a : a + L] * (
+                1 - fade_in[:L]
+            )
+            x_clean[b - L : b] = x_clean[b - L : b] * fade_out[-L:] + x[b - L : b] * (
+                1 - fade_out[-L:]
+            )
 
     return x_clean
 
 
-def remove_artifacts_with_envelope(x, artifact_regions, fs, extend_s=0.5, smooth_s=0.1, method="abs_smooth"):
+def remove_artifacts_with_envelope(
+    x, artifact_regions, fs, extend_s=0.5, smooth_s=0.1, method="abs_smooth"
+):
     """
     Remove artifacts by extending artifact regions, computing envelope, subtracting it,
     and applying smoothing at the edges to avoid abrupt jumps.
@@ -531,7 +553,7 @@ def remove_artifacts_with_envelope(x, artifact_regions, fs, extend_s=0.5, smooth
     extend_samples = int(extend_s * fs)
     smooth_samples = int(smooth_s * fs)
 
-    for (start, end) in artifact_regions:
+    for start, end in artifact_regions:
         # --- Extend artifact region forward ---
         end_extended = min(n, end + extend_samples)
 
@@ -543,7 +565,7 @@ def remove_artifacts_with_envelope(x, artifact_regions, fs, extend_s=0.5, smooth
             segment_env = np.abs(hilbert(segment))
         elif method == "abs_smooth":
             win = max(1, int(0.01 * fs))  # 10 ms window
-            segment_env = np.convolve(np.abs(segment), np.ones(win)/win, mode="same")
+            segment_env = np.convolve(np.abs(segment), np.ones(win) / win, mode="same")
         else:
             raise ValueError("method must be 'hilbert' or 'abs_smooth'")
 
@@ -561,8 +583,7 @@ def remove_artifacts_with_envelope(x, artifact_regions, fs, extend_s=0.5, smooth
     return x_clean
 
 
-
-def artifact_removal_wavelet(x, wavelet='haar', level=6):
+def artifact_removal_wavelet(x, wavelet="haar", level=6):
     """
     SWT-based artifact removal, preserving slow wave, fiber and ripple
     Args:
@@ -578,7 +599,7 @@ def artifact_removal_wavelet(x, wavelet='haar', level=6):
     # --- Step 1: Padding ---
     n = len(x)
     next_pow2 = 2 ** int(np.ceil(np.log2(n)))
-    x_padded = np.pad(x, (0, next_pow2 - n), mode='constant')
+    x_padded = np.pad(x, (0, next_pow2 - n), mode="constant")
 
     # --- Step 2: SWT decomposition ---
     coeffs = pywt.swt(x_padded, wavelet, level=level)
@@ -588,30 +609,30 @@ def artifact_removal_wavelet(x, wavelet='haar', level=6):
 
     k1 = 3
     sigma = np.median(np.abs(cA_last)) / 0.6745  # MAD（median absolute deviation ）
-    T = k1 * np.sqrt(2 * np.log10(len(cA_last)) * sigma** 2)  # soft threshold
+    T = k1 * np.sqrt(2 * np.log10(len(cA_last)) * sigma**2)  # soft threshold
     id_A = np.where(np.abs(cA_last) > T)[0]
 
     # Garrote thresholding
     cA_new = cA_last.copy()
-    cA_new[id_A] = T ** 2 / cA_last[id_A]
+    cA_new[id_A] = T**2 / cA_last[id_A]
 
     # --- Step 4: Detail coefficient thresholding ---
     D_new = []
     id_D = []
     for i, (cA, cD) in enumerate(coeffs, start=1):
         # Determine threshold multiplier k2
-        if i in [2,5,6]:  # ripple layers,so high threshold
+        if i in [2, 5, 6]:  # ripple layers,so high threshold
             k2 = 3
         else:
             k2 = 1
 
         sigma_sq = np.median(np.abs(cD)) / 0.6745
-        Th = k2 * np.sqrt(2 * np.log10(len(cD)) * sigma_sq** 2) # ** 2
+        Th = k2 * np.sqrt(2 * np.log10(len(cD)) * sigma_sq**2)  # ** 2
         idx = np.where(np.abs(cD) > Th)[0]
 
         # Garrote thresholding
         cD_new = cD.copy()
-        cD_new[idx] = Th ** 2 / cD[idx]
+        cD_new[idx] = Th**2 / cD[idx]
 
         D_new.append(cD_new)
         id_D.append(idx)
@@ -628,7 +649,6 @@ def artifact_removal_wavelet(x, wavelet='haar', level=6):
     data_new = data_new[:n]
 
     return data_new
-
 
 
 '''
@@ -792,7 +812,6 @@ def artifact_removal_wavelet(x, wavelet='haar', level=6):
 '''
 
 
-
 '''
 
 def plot_signal(original, filtered, fs, window_sec = 5.0):
@@ -856,8 +875,3 @@ def plot_signal(original, filtered, fs, window_sec = 5.0):
 
     plt.show()
 '''
-
-
-
-
-

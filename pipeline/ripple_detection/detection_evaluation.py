@@ -1,12 +1,9 @@
-
 # Some functions and definitions used to evaluate the performance of detection method: event-based strategy and
 # time_interval_based strategy
 
 import numpy as np
-import scipy.signal as ss
-from scipy.signal.windows import boxcar
 import pandas as pd
-from scipy.signal import find_peaks
+
 
 def get_binary_predictions(y_prob, threshold, min_distance, min_width):
     """
@@ -44,7 +41,7 @@ def get_binary_predictions(y_prob, threshold, min_distance, min_width):
 
     # find contiguous segments
     # diff == 1 -> event starts, diff == -1 -> event ends
-    padded = np.concatenate([[0],binary,[0]])
+    padded = np.concatenate([[0], binary, [0]])
     diff = np.diff(padded)
     starts = np.where(diff == 1)[0]
     ends = np.where(diff == -1)[0]  # end is exclusive
@@ -66,7 +63,6 @@ def get_binary_predictions(y_prob, threshold, min_distance, min_width):
                 merged_events[-1][1] = end
             else:
                 merged_events.append([start, end])
-
 
     # filter out events that are too short
     final_events = []
@@ -90,11 +86,12 @@ def get_binary_predictions(y_prob, threshold, min_distance, min_width):
 
         detected_peaks.append(start + pos)
 
+    return y_binary, np.asarray(detected_peaks)
 
-    return y_binary,np.asarray(detected_peaks)
 
-
-def get_tps_fps_fns_event_based(y_prob,ripple_onset,ripple_offset,detected_peaks,decimals = 3):
+def get_tps_fps_fns_event_based(
+    y_prob, ripple_onset, ripple_offset, detected_peaks, decimals=3
+):
     """
     Event based evaluations using one to one peak-to-event matching
 
@@ -128,12 +125,15 @@ def get_tps_fps_fns_event_based(y_prob,ripple_onset,ripple_offset,detected_peaks
     if ripple_onset.size != ripple_offset.size:
         raise ValueError("ripple_onset and ripple_offset must have the same length.")
 
-
     # handle no GT case or no prediction case
     if ripple_onset.size == 0 or detected_peaks.size == 0:
         tps = np.array([], dtype=int)
         fps = detected_peaks.copy()
-        fns = np.arange(ripple_onset.size) if ripple_onset.size > 0 else np.array([], dtype=int)
+        fns = (
+            np.arange(ripple_onset.size)
+            if ripple_onset.size > 0
+            else np.array([], dtype=int)
+        )
 
         TP, FP, FN = 0, len(fps), len(fns)
         precision = 0.0
@@ -141,10 +141,17 @@ def get_tps_fps_fns_event_based(y_prob,ripple_onset,ripple_offset,detected_peaks
         f1 = 0.0
 
         stats = pd.DataFrame(
-            [[TP, FP, FN, FP + FN,
-              np.round(precision, decimals),
-              np.round(recall, decimals),
-              np.round(f1, decimals)]],
+            [
+                [
+                    TP,
+                    FP,
+                    FN,
+                    FP + FN,
+                    np.round(precision, decimals),
+                    np.round(recall, decimals),
+                    np.round(f1, decimals),
+                ]
+            ],
             columns=["TP", "FP", "FN", "FP+FN", "precision", "recall", "F_1"],
         )
         return tps, fps, fns, stats
@@ -152,7 +159,6 @@ def get_tps_fps_fns_event_based(y_prob,ripple_onset,ripple_offset,detected_peaks
     # one-to-one matching to find TPs
     tps = []
     fns = []
-
 
     # Iterate through each GT event to find the best matching peak
     for k, (s, e) in enumerate(zip(ripple_onset, ripple_offset)):
@@ -164,7 +170,9 @@ def get_tps_fps_fns_event_based(y_prob,ripple_onset,ripple_offset,detected_peaks
             continue
 
         # Of the peaks inside, find the one with the highest probability
-        best_peak_local_idx = inside_peak_indices[np.argmax(y_prob[detected_peaks[inside_peak_indices]])]
+        best_peak_local_idx = inside_peak_indices[
+            np.argmax(y_prob[detected_peaks[inside_peak_indices]])
+        ]
 
         # Add the best peak's *value* (timepoint) to the TP list
         tps.append(detected_peaks[best_peak_local_idx])
@@ -192,18 +200,28 @@ def get_tps_fps_fns_event_based(y_prob,ripple_onset,ripple_offset,detected_peaks
 
     precision = 0.0 if (TP + FP) == 0 else TP / (TP + FP)
     recall = 0.0 if (TP + FN) == 0 else TP / (TP + FN)
-    f1 = 0.0 if (precision + recall) == 0 else (2 * precision * recall) / (precision + recall)
+    f1 = (
+        0.0
+        if (precision + recall) == 0
+        else (2 * precision * recall) / (precision + recall)
+    )
 
     stats = pd.DataFrame(
-        [[TP, FP, FN, FP + FN,
-          np.round(precision, decimals),
-          np.round(recall, decimals),
-          np.round(f1, decimals)]],
+        [
+            [
+                TP,
+                FP,
+                FN,
+                FP + FN,
+                np.round(precision, decimals),
+                np.round(recall, decimals),
+                np.round(f1, decimals),
+            ]
+        ],
         columns=["TP", "FP", "FN", "FP+FN", "precision", "recall", "F_1"],
     )
 
     return tps, fps, fns, stats
-
 
 
 def interval_iou(a_start: int, a_end: int, b_start: int, b_end: int):
@@ -223,7 +241,16 @@ def interval_iou(a_start: int, a_end: int, b_start: int, b_end: int):
     return inter / union
 
 
-def get_tps_fps_fns_time_interval_based(y_prob, y_binary, ripple_onset, ripple_offset, gt_peaks, iou_threshold = 0.3, peak_tol=10, decimals = 3):
+def get_tps_fps_fns_time_interval_based(
+    y_prob,
+    y_binary,
+    ripple_onset,
+    ripple_offset,
+    gt_peaks,
+    iou_threshold=0.3,
+    peak_tol=10,
+    decimals=3,
+):
     """
     Time-interval–based evaluation using IoU matching .
 
@@ -264,9 +291,19 @@ def get_tps_fps_fns_time_interval_based(y_prob, y_binary, ripple_onset, ripple_o
     padded = np.concatenate([[0], y_binary, [0]])
     diff = np.diff(padded)
     starts = np.where(diff == 1)[0]
-    ends = np.where(diff == -1)[0] - 1 # inclusive, because offset in the ground truth is also inclusive
-    pred_intervals = np.stack([starts, ends], axis=1) if starts.size > 0 else np.zeros((0, 2), dtype=int)
-    gt_intervals = np.stack([ripple_onset, ripple_offset], axis=1) if ripple_onset.size > 0 else np.zeros((0, 2), dtype=int)
+    ends = (
+        np.where(diff == -1)[0] - 1
+    )  # inclusive, because offset in the ground truth is also inclusive
+    pred_intervals = (
+        np.stack([starts, ends], axis=1)
+        if starts.size > 0
+        else np.zeros((0, 2), dtype=int)
+    )
+    gt_intervals = (
+        np.stack([ripple_onset, ripple_offset], axis=1)
+        if ripple_onset.size > 0
+        else np.zeros((0, 2), dtype=int)
+    )
 
     M = pred_intervals.shape[0]
     N = gt_intervals.shape[0]
@@ -276,10 +313,9 @@ def get_tps_fps_fns_time_interval_based(y_prob, y_binary, ripple_onset, ripple_o
     for i in range(M):
         start, end = pred_intervals[i]
         if end >= start:
-            pred_peaks[i] = start + np.argmax(y_prob[start:end + 1])
+            pred_peaks[i] = start + np.argmax(y_prob[start : end + 1])
         else:
             pred_peaks[i] = start
-
 
     # ---- default assignments (cover all edge cases) ----
     matched_pred = np.zeros(M, dtype=bool)
@@ -327,21 +363,28 @@ def get_tps_fps_fns_time_interval_based(y_prob, y_binary, ripple_onset, ripple_o
 
     precision = TP / (TP + FP) if (TP + FP) else 0.0
     recall = TP / (TP + FN) if (TP + FN) else 0.0
-    f1 = 0.0 if (precision + recall) == 0 else 2 * precision * recall / (precision + recall)
+    f1 = (
+        0.0
+        if (precision + recall) == 0
+        else 2 * precision * recall / (precision + recall)
+    )
 
     stats = pd.DataFrame(
-        [[TP, FP, FN, FP + FN,
-          np.round(precision, decimals),
-          np.round(recall, decimals),
-          np.round(f1, decimals)]],
+        [
+            [
+                TP,
+                FP,
+                FN,
+                FP + FN,
+                np.round(precision, decimals),
+                np.round(recall, decimals),
+                np.round(f1, decimals),
+            ]
+        ],
         columns=["TP", "FP", "FN", "FP+FN", "precision", "recall", "F_1"],
     )
 
     return tps, fps, fns, stats
-
-
-
-
 
 
 '''
@@ -441,4 +484,3 @@ def get_tps_fps_fns_time_interval_based(y_binary,ripple_onset,ripple_offset,iou_
 
     return tps, fps, fns, stats
 '''
-

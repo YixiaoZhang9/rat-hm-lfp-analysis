@@ -1,15 +1,16 @@
-import numpy as np
-from scipy.signal import iirnotch,butter, filtfilt, hilbert,convolve, get_window
-from scipy.signal.windows import gaussian
-from scipy.stats import zscore
 import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
+from scipy.signal import butter, convolve, filtfilt, get_window, hilbert
+from scipy.signal.windows import gaussian
+
 from modules.lfp_artifact_MAD_detection import mad_artifact_detector
 
-def filter_lfp(lfp, fs,freq_range):
+
+def filter_lfp(lfp, fs, freq_range):
     # Bandpass filter
-    b, a = butter(4, np.array(freq_range)/(fs/2), btype='band')
+    b, a = butter(4, np.array(freq_range) / (fs / 2), btype="band")
     return filtfilt(b, a, lfp)
+
 
 def smooth_signal(signal, fs, sigma):
     """Smooth the signal using a Gaussian filter."""
@@ -27,7 +28,7 @@ def smooth_signal(signal, fs, sigma):
     # Normalize the Gaussian filter
     gauss_filter = gauss_filter / sum(gauss_filter)
     # Apply the filter using convolution
-    smoothed_lfp = convolve(signal, gauss_filter, 'same')
+    smoothed_lfp = convolve(signal, gauss_filter, "same")
     return smoothed_lfp
 
 
@@ -37,7 +38,10 @@ def intervals_to_mask(intervals, timestamps):
         mask |= (timestamps >= start) & (timestamps <= end)
     return mask
 
-def compute_peak_mean_frequency(segment, fs, window_type='hamming',freq_band=(100, 250)):
+
+def compute_peak_mean_frequency(
+    segment, fs, window_type="hamming", freq_band=(100, 250)
+):
     """
     Compute the spectral centroid of a short signal segment.
 
@@ -100,7 +104,9 @@ def compute_peak_mean_frequency(segment, fs, window_type='hamming',freq_band=(10
     return peak_freq, mean_freq
 
 
-def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3, smoothing_sigma=0.006,f_plot = 0):
+def find_ripples_karlsson_Adaptive(
+    lfp, fs, min_duration=0.015, zscore_thresh=3, smoothing_sigma=0.006, f_plot=0
+):
     """
     Detect hippocampal ripples using an adaptive Karlsson & Frank (2009)-based ripple detection algorithm with
     automatic artifact rejection.
@@ -194,8 +200,13 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
     """
 
     # Detect LFP artifacts using the median absolute deviation method
-    (valid_times, artifact_intervals_s) = mad_artifact_detector(lfp, mad_thresh = 6.0, proportion_above_thresh = 0.1,
-    removal_window_ms = 100.0,sampling_frequency = fs)
+    (valid_times, artifact_intervals_s) = mad_artifact_detector(
+        lfp,
+        mad_thresh=6.0,
+        proportion_above_thresh=0.1,
+        removal_window_ms=100.0,
+        sampling_frequency=fs,
+    )
 
     # convert intervals to mask
     t = np.arange(len(lfp)) / fs
@@ -213,10 +224,18 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
     above_mean = (zscored_envelope > 0.5) & valid_mask
     above_thresh = (zscored_envelope > zscore_thresh) & valid_mask
 
-    start_idx_mean = np.where(np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1)[0]
-    end_idx_mean = np.where(np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1)[0]
-    start_idx_threshold = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
-    end_idx_threshold = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    start_idx_mean = np.where(
+        np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1
+    )[0]
+    end_idx_mean = np.where(
+        np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1
+    )[0]
+    start_idx_threshold = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
+    end_idx_threshold = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
     # extend the threshold
     start_idx_ripple, peak_idx_ripple, end_idx_ripple = [], [], []
@@ -233,7 +252,7 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
                 start_idx_ripple.append(start_idx_mean[idx])
                 end_idx_ripple.append(end_idx_mean[idx])
                 # find the peak
-                segment = smoothed_envelope[start_idx_mean[idx]:end_idx_mean[idx]]
+                segment = smoothed_envelope[start_idx_mean[idx] : end_idx_mean[idx]]
                 peak_local = np.argmax(segment)
                 peak_idx_ripple.append(start_idx_mean[idx] + peak_local)
 
@@ -245,7 +264,6 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
     clean_peak = []
 
     for start, end, peak in zip(start_idx_ripple, end_idx_ripple, peak_idx_ripple):
-
         # full ripple must be clean
         if not np.all(valid_mask[start:end]):
             continue
@@ -265,8 +283,7 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
     end_idx_ripple = np.array(clean_end)
     peak_idx_ripple = np.array(clean_peak)
 
-
-   #calculate the features of ripples
+    # calculate the features of ripples
     duration_ripple = []
     amplitude_ripple = []
     peak_frequency_ripple = []
@@ -278,17 +295,16 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
         duration_ripple.append(duration)
 
         # Amplitude: raw Hilbert envelope peak
-        envelope_segment = instantaneous_amplitude[start:end + 1]
+        envelope_segment = instantaneous_amplitude[start : end + 1]
         amplitude = np.max(envelope_segment)
         amplitude_ripple.append(amplitude)
 
         # Frequency: filtered ripple segment
-        signal_segment = filtered_lfp[start:end + 1]
+        signal_segment = filtered_lfp[start : end + 1]
         peak_freq, mean_freq = compute_peak_mean_frequency(signal_segment, fs)
 
         peak_frequency_ripple.append(peak_freq)
         mean_frequency_ripple.append(mean_freq)
-
 
     start_times = start_idx_ripple / fs
     end_times = end_idx_ripple / fs
@@ -296,8 +312,12 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
 
     if f_plot:
         artifact_mask = ~valid_mask
-        artifact_start = np.where(np.diff(np.concatenate(([0], artifact_mask.astype(int)))) == 1)[0]
-        artifact_end = np.where(np.diff(np.concatenate((artifact_mask.astype(int), [0]))) == -1)[0]
+        artifact_start = np.where(
+            np.diff(np.concatenate(([0], artifact_mask.astype(int)))) == 1
+        )[0]
+        artifact_end = np.where(
+            np.diff(np.concatenate((artifact_mask.astype(int), [0]))) == -1
+        )[0]
         t = np.arange(len(lfp)) / fs
 
         fig, axs = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
@@ -307,7 +327,14 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
         axs[0].set_ylabel("LFP (uV)")
         axs[0].legend()
 
-        axs[1].plot(t, filtered_lfp, color="gray", lw=0.5, alpha=0.7, label="Filtered LFP (100–250 Hz)")
+        axs[1].plot(
+            t,
+            filtered_lfp,
+            color="gray",
+            lw=0.5,
+            alpha=0.7,
+            label="Filtered LFP (100–250 Hz)",
+        )
         axs[1].plot(t, smoothed_envelope, color="b", lw=1.2, label="Smoothed envelope")
         # ripple spans
         for start, end in zip(start_times, end_times):
@@ -315,17 +342,37 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
 
         # artifact spans
         for i, (start, end) in enumerate(zip(artifact_start, artifact_end)):
-            axs[1].axvspan(start / fs, end / fs, color="red", alpha=0.2,
-                           label="Artifact" if i == 0 else None)
+            axs[1].axvspan(
+                start / fs,
+                end / fs,
+                color="red",
+                alpha=0.2,
+                label="Artifact" if i == 0 else None,
+            )
 
-        axs[1].scatter(peak_times, smoothed_envelope[peak_idx_ripple],
-                       color="magenta", s=30, label="Ripple peaks")
+        axs[1].scatter(
+            peak_times,
+            smoothed_envelope[peak_idx_ripple],
+            color="magenta",
+            s=30,
+            label="Ripple peaks",
+        )
 
-        axs[1].scatter(start_times, smoothed_envelope[start_idx_ripple],
-                       color="green", s=25, label="Ripple start points")
+        axs[1].scatter(
+            start_times,
+            smoothed_envelope[start_idx_ripple],
+            color="green",
+            s=25,
+            label="Ripple start points",
+        )
 
-        axs[1].scatter(end_times, smoothed_envelope[end_idx_ripple],
-                       color="pink", s=25, label="Ripple end points")
+        axs[1].scatter(
+            end_times,
+            smoothed_envelope[end_idx_ripple],
+            color="pink",
+            s=25,
+            label="Ripple end points",
+        )
 
         axs[1].set_title("Filtered LFP + Envelope + Ripple Detection")
         axs[1].set_ylabel("Amplitude")
@@ -344,11 +391,8 @@ def find_ripples_karlsson_Adaptive(lfp, fs, min_duration=0.015, zscore_thresh=3,
         "StartIndex": start_idx_ripple,
         "PeakIndex": peak_idx_ripple,
         "EndIndex": end_idx_ripple,
-        "Duration":duration_ripple,
-        "Amplitude" :amplitude_ripple,
-        "Peak_Frequency":peak_frequency_ripple,
-        "Mean_Frequency": mean_frequency_ripple
+        "Duration": duration_ripple,
+        "Amplitude": amplitude_ripple,
+        "Peak_Frequency": peak_frequency_ripple,
+        "Mean_Frequency": mean_frequency_ripple,
     }
-
-
-

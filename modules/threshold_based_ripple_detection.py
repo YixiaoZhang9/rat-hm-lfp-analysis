@@ -16,16 +16,23 @@ Implemented methods
 
 # Imports
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy.signal import (butter,filtfilt,hilbert,convolve,get_window,)
+from scipy.signal import (
+    butter,
+    convolve,
+    filtfilt,
+    get_window,
+    hilbert,
+)
 from scipy.signal.windows import gaussian
 from scipy.stats import zscore
 
 
-
 # Functions
-def filter_lfp(lfp: np.ndarray, fs: float,freq_range: tuple = (100, 250),) -> np.ndarray:
+def filter_lfp(
+    lfp: np.ndarray,
+    fs: float,
+    freq_range: tuple = (100, 250),
+) -> np.ndarray:
     """
     Bandpass filter LFP signal.
 
@@ -43,11 +50,19 @@ def filter_lfp(lfp: np.ndarray, fs: float,freq_range: tuple = (100, 250),) -> np
     np.ndarray
         Filtered LFP signal.
     """
-    b, a = butter(4,np.array(freq_range) / (fs / 2), btype="band",)
+    b, a = butter(
+        4,
+        np.array(freq_range) / (fs / 2),
+        btype="band",
+    )
     return filtfilt(b, a, lfp)
 
 
-def smooth_signal(signal: np.ndarray,fs: float,sigma: float,) -> np.ndarray:
+def smooth_signal(
+    signal: np.ndarray,
+    fs: float,
+    sigma: float,
+) -> np.ndarray:
     """
     Smooth signal using a Gaussian kernel.
 
@@ -69,13 +84,25 @@ def smooth_signal(signal: np.ndarray,fs: float,sigma: float,) -> np.ndarray:
     window_size = int(smoothing_sigma * 6)
     if window_size % 2 == 0:
         window_size += 1
-    gauss_filter = gaussian(window_size,smoothing_sigma,)
+    gauss_filter = gaussian(
+        window_size,
+        smoothing_sigma,
+    )
     gauss_filter /= np.sum(gauss_filter)
-    smoothed_signal = convolve(signal,gauss_filter,mode="same",)
+    smoothed_signal = convolve(
+        signal,
+        gauss_filter,
+        mode="same",
+    )
     return smoothed_signal
 
 
-def merge_close_ripples(start_idx,end_idx,fs,close_ripple_thresh,):
+def merge_close_ripples(
+    start_idx,
+    end_idx,
+    fs,
+    close_ripple_thresh,
+):
     """
     Merge ripple events that are temporally close.
 
@@ -103,11 +130,9 @@ def merge_close_ripples(start_idx,end_idx,fs,close_ripple_thresh,):
     i = 0
 
     while i < len(start_idx) - 1:
-
         interval_duration = (start_idx[i + 1] - end_idx[i]) / fs
 
         if interval_duration <= close_ripple_thresh:
-
             start_idx[i + 1] = start_idx[i]
             start_idx = np.delete(start_idx, i)
             end_idx = np.delete(end_idx, i)
@@ -118,7 +143,11 @@ def merge_close_ripples(start_idx,end_idx,fs,close_ripple_thresh,):
     return start_idx, end_idx
 
 
-def fastrms(signal,window_size=5,apply_amplitude_correction=False,):
+def fastrms(
+    signal,
+    window_size=5,
+    apply_amplitude_correction=False,
+):
     """
     Compute moving RMS power.
 
@@ -137,21 +166,36 @@ def fastrms(signal,window_size=5,apply_amplitude_correction=False,):
         RMS signal.
     """
     if signal.ndim > 2:
-        raise ValueError( "Input signal must be 1D or 2D.")
+        raise ValueError("Input signal must be 1D or 2D.")
 
     if window_size <= 0:
         raise ValueError("window_size must be positive.")
 
-    window = get_window("boxcar",window_size,)
+    window = get_window(
+        "boxcar",
+        window_size,
+    )
 
-    power = signal ** 2
+    power = signal**2
 
     if signal.ndim == 1:
-
-        rms = convolve(power,window,mode="same",)
+        rms = convolve(
+            power,
+            window,
+            mode="same",
+        )
 
     else:
-        rms = np.array([convolve(power[:, col], window,mode="same",)for col in range(signal.shape[1])]).T
+        rms = np.array(
+            [
+                convolve(
+                    power[:, col],
+                    window,
+                    mode="same",
+                )
+                for col in range(signal.shape[1])
+            ]
+        ).T
 
     rms = np.sqrt(rms / np.sum(window))
     if apply_amplitude_correction:
@@ -159,9 +203,17 @@ def fastrms(signal,window_size=5,apply_amplitude_correction=False,):
 
     return rms
 
+
 # Ripple Detection Methods
 
-def find_ripples_karlsson( lfp,fs, min_duration=0.015,zscore_thresh=3,smoothing_sigma=0.004,):
+
+def find_ripples_karlsson(
+    lfp,
+    fs,
+    min_duration=0.015,
+    zscore_thresh=3,
+    smoothing_sigma=0.004,
+):
     """
     Detect ripples using the Karlsson & Frank method.
 
@@ -171,35 +223,55 @@ def find_ripples_karlsson( lfp,fs, min_duration=0.015,zscore_thresh=3,smoothing_
            Awake replay of remote experiences in the hippocampus.
            Nature Neuroscience, 12, 913–918.
     """
-    filtered_lfp = filter_lfp(lfp,fs,(100, 250),)
+    filtered_lfp = filter_lfp(
+        lfp,
+        fs,
+        (100, 250),
+    )
 
     instantaneous_amplitude = np.abs(hilbert(filtered_lfp))
 
-    smoothed_envelope = smooth_signal(instantaneous_amplitude,fs,smoothing_sigma,)
+    smoothed_envelope = smooth_signal(
+        instantaneous_amplitude,
+        fs,
+        smoothing_sigma,
+    )
 
     zscored_envelope = zscore(smoothed_envelope)
 
     above_mean = zscored_envelope > 0
 
-    above_thresh = (zscored_envelope > zscore_thresh)
+    above_thresh = zscored_envelope > zscore_thresh
 
-    threshold_envelope = (zscore_thresh* np.std(smoothed_envelope)+ np.mean(smoothed_envelope))
+    threshold_envelope = zscore_thresh * np.std(smoothed_envelope) + np.mean(
+        smoothed_envelope
+    )
 
-    start_idx_mean = np.where(np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1)[0]
+    start_idx_mean = np.where(
+        np.diff(np.concatenate(([0], above_mean.astype(int)))) == 1
+    )[0]
 
-    end_idx_mean = np.where(np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1)[0]
+    end_idx_mean = np.where(
+        np.diff(np.concatenate((above_mean.astype(int), [0]))) == -1
+    )[0]
 
-    start_idx_thresh = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
+    start_idx_thresh = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
 
-    end_idx_thresh = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    end_idx_thresh = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
     start_idx_ripple = []
     end_idx_ripple = []
     peak_idx_ripple = []
 
-    for start, end in zip(start_idx_thresh,end_idx_thresh,):
-
-        in_mean_idx = np.where((start_idx_mean <= start)& (end_idx_mean >= end))[0]
+    for start, end in zip(
+        start_idx_thresh,
+        end_idx_thresh,
+    ):
+        in_mean_idx = np.where((start_idx_mean <= start) & (end_idx_mean >= end))[0]
 
         if len(in_mean_idx) == 0:
             continue
@@ -231,14 +303,21 @@ def find_ripples_karlsson( lfp,fs, min_duration=0.015,zscore_thresh=3,smoothing_
         "start_idx": start_idx_ripple,
         "end_idx": end_idx_ripple,
         "peak_idx": peak_idx_ripple,
-
         "start_time": start_idx_ripple / fs,
         "end_time": end_idx_ripple / fs,
         "peak_time": peak_idx_ripple / fs,
     }
 
 
-def find_ripples_dahal(lfp,fs,min_duration=0.02,zscore_thresh=2.0,zscore_peak_thresh=5.0,smoothing_sigma=0.004,close_ripple_thresh=0.03,):
+def find_ripples_dahal(
+    lfp,
+    fs,
+    min_duration=0.02,
+    zscore_thresh=2.0,
+    zscore_peak_thresh=5.0,
+    smoothing_sigma=0.004,
+    close_ripple_thresh=0.03,
+):
     """
     Detect ripples using the Dahal et al. method.
 
@@ -249,35 +328,53 @@ def find_ripples_dahal(lfp,fs,min_duration=0.02,zscore_thresh=2.0,zscore_peak_th
            long-term memory processes.
            PNAS.
     """
-    filtered_lfp = filter_lfp(lfp,fs,(100, 250),)
+    filtered_lfp = filter_lfp(
+        lfp,
+        fs,
+        (100, 250),
+    )
 
     instantaneous_amplitude = np.abs(hilbert(filtered_lfp))
 
-    smoothed_envelope = smooth_signal(instantaneous_amplitude,fs,smoothing_sigma,)
+    smoothed_envelope = smooth_signal(
+        instantaneous_amplitude,
+        fs,
+        smoothing_sigma,
+    )
 
     zscored_envelope = zscore(smoothed_envelope)
 
-    above_thresh = (zscored_envelope > zscore_thresh)
+    above_thresh = zscored_envelope > zscore_thresh
 
-    start_idx_thresh = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
+    start_idx_thresh = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
 
-    end_idx_thresh = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    end_idx_thresh = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
     start_idx_ripple = []
     end_idx_ripple = []
 
-    for start, end in zip(start_idx_thresh,end_idx_thresh,):
-
+    for start, end in zip(
+        start_idx_thresh,
+        end_idx_thresh,
+    ):
         peak_ripple = np.max(zscored_envelope[start:end])
 
         duration_ripple = (end - start) / fs
 
-        if (peak_ripple > zscore_peak_thresh and duration_ripple > min_duration):
-
+        if peak_ripple > zscore_peak_thresh and duration_ripple > min_duration:
             start_idx_ripple.append(start)
             end_idx_ripple.append(end)
 
-    start_idx_ripple, end_idx_ripple = (merge_close_ripples(start_idx_ripple,end_idx_ripple,fs,close_ripple_thresh,))
+    start_idx_ripple, end_idx_ripple = merge_close_ripples(
+        start_idx_ripple,
+        end_idx_ripple,
+        fs,
+        close_ripple_thresh,
+    )
 
     start_idx_ripple = np.array(start_idx_ripple)
 
@@ -287,44 +384,65 @@ def find_ripples_dahal(lfp,fs,min_duration=0.02,zscore_thresh=2.0,zscore_peak_th
         "start_idx": start_idx_ripple,
         "end_idx": end_idx_ripple,
         "peak_idx": None,
-
         "start_time": start_idx_ripple / fs,
         "end_time": end_idx_ripple / fs,
         "peak_time": None,
     }
 
 
-def find_ripples_diba(lfp,fs,min_duration=0,zscore_thresh=2,):
+def find_ripples_diba(
+    lfp,
+    fs,
+    min_duration=0,
+    zscore_thresh=2,
+):
     """
     Detect ripples using the Diba & Buzsáki method.
     """
-    filtered_lfp = filter_lfp(lfp,fs,(100, 250),)
+    filtered_lfp = filter_lfp(
+        lfp,
+        fs,
+        (100, 250),
+    )
 
     window_size = int(0.005 * fs)
 
-    power = fastrms(filtered_lfp,window_size,)
+    power = fastrms(
+        filtered_lfp,
+        window_size,
+    )
 
     mean_power = np.mean(power)
     std_power = np.std(power)
 
-    above_thresh = (power > (mean_power+ zscore_thresh * std_power))
+    above_thresh = power > (mean_power + zscore_thresh * std_power)
 
-    above_extension_thresh = (power > (mean_power+ 1.5 * std_power))
+    above_extension_thresh = power > (mean_power + 1.5 * std_power)
 
-    start_idx_thresh = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
+    start_idx_thresh = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
 
-    end_idx_thresh = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1)[0]
+    end_idx_thresh = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
-    start_idx_ext = np.where(np.diff(np.concatenate(([0], above_extension_thresh.astype(int)))) == 1)[0]
+    start_idx_ext = np.where(
+        np.diff(np.concatenate(([0], above_extension_thresh.astype(int)))) == 1
+    )[0]
 
-    end_idx_ext = np.where(np.diff(np.concatenate((above_extension_thresh.astype(int), [0]))) == -1)[0]
+    end_idx_ext = np.where(
+        np.diff(np.concatenate((above_extension_thresh.astype(int), [0]))) == -1
+    )[0]
 
     start_idx_ripple = []
     end_idx_ripple = []
 
-    for start, end in zip(start_idx_thresh,end_idx_thresh,):
-
-        in_mean_idx = np.where((start_idx_ext <= start)& (end_idx_ext >= end))[0]
+    for start, end in zip(
+        start_idx_thresh,
+        end_idx_thresh,
+    ):
+        in_mean_idx = np.where((start_idx_ext <= start) & (end_idx_ext >= end))[0]
 
         if len(in_mean_idx) == 0:
             continue
@@ -335,7 +453,6 @@ def find_ripples_diba(lfp,fs,min_duration=0,zscore_thresh=2,):
         ripple_end = end_idx_ext[idx]
 
         if (ripple_end - ripple_start) / fs >= min_duration:
-
             start_idx_ripple.append(ripple_start)
 
             end_idx_ripple.append(ripple_end)
@@ -348,14 +465,19 @@ def find_ripples_diba(lfp,fs,min_duration=0,zscore_thresh=2,):
         "start_idx": start_idx_ripple,
         "end_idx": end_idx_ripple,
         "peak_idx": None,
-
         "start_time": start_idx_ripple / fs,
         "end_time": end_idx_ripple / fs,
         "peak_time": None,
     }
 
 
-def find_ripples_vicente(lfp,fs,min_duration=0.015,zscore_thresh=5,close_ripple_thresh=0.015,):
+def find_ripples_vicente(
+    lfp,
+    fs,
+    min_duration=0.015,
+    zscore_thresh=5,
+    close_ripple_thresh=0.015,
+):
     """
     Detect ripples using the Vicente et al. method.
 
@@ -367,33 +489,50 @@ def find_ripples_vicente(lfp,fs,min_duration=0.015,zscore_thresh=5,close_ripple_
            during hippocampal sharp-wave ripples.
            Neuroscience, 435, 95–111.
     """
-    filtered_lfp = filter_lfp(lfp,fs,(100, 250),)
+    filtered_lfp = filter_lfp(
+        lfp,
+        fs,
+        (100, 250),
+    )
 
     window_size = int(0.005 * fs)
 
-    power = fastrms(filtered_lfp,window_size,)
+    power = fastrms(
+        filtered_lfp,
+        window_size,
+    )
 
     mean_power = np.mean(power)
     std_power = np.std(power)
 
-    above_thresh = (power > ( mean_power+ zscore_thresh * std_power))
+    above_thresh = power > (mean_power + zscore_thresh * std_power)
 
-    above_extension_thresh = (power > (mean_power+ 0.5 * std_power))
+    above_extension_thresh = power > (mean_power + 0.5 * std_power)
 
-    start_idx_thresh = np.where(np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1)[0]
+    start_idx_thresh = np.where(
+        np.diff(np.concatenate(([0], above_thresh.astype(int)))) == 1
+    )[0]
 
-    end_idx_thresh = np.where(np.diff(np.concatenate((above_thresh.astype(int), [0])) ) == -1)[0]
+    end_idx_thresh = np.where(
+        np.diff(np.concatenate((above_thresh.astype(int), [0]))) == -1
+    )[0]
 
-    start_idx_ext = np.where(np.diff(np.concatenate(([0], above_extension_thresh.astype(int)))) == 1)[0]
+    start_idx_ext = np.where(
+        np.diff(np.concatenate(([0], above_extension_thresh.astype(int)))) == 1
+    )[0]
 
-    end_idx_ext = np.where(np.diff(np.concatenate((above_extension_thresh.astype(int), [0]))) == -1)[0]
+    end_idx_ext = np.where(
+        np.diff(np.concatenate((above_extension_thresh.astype(int), [0]))) == -1
+    )[0]
 
     start_idx_ripple = []
     end_idx_ripple = []
 
-    for start, end in zip(start_idx_thresh,end_idx_thresh,):
-
-        in_mean_idx = np.where((start_idx_ext <= start)& (end_idx_ext >= end))[0]
+    for start, end in zip(
+        start_idx_thresh,
+        end_idx_thresh,
+    ):
+        in_mean_idx = np.where((start_idx_ext <= start) & (end_idx_ext >= end))[0]
 
         if len(in_mean_idx) == 0:
             continue
@@ -404,12 +543,16 @@ def find_ripples_vicente(lfp,fs,min_duration=0.015,zscore_thresh=5,close_ripple_
         ripple_end = end_idx_ext[idx]
 
         if (ripple_end - ripple_start) / fs >= min_duration:
-
             start_idx_ripple.append(ripple_start)
 
             end_idx_ripple.append(ripple_end)
 
-    start_idx_ripple, end_idx_ripple = (merge_close_ripples(start_idx_ripple,end_idx_ripple,fs,close_ripple_thresh,))
+    start_idx_ripple, end_idx_ripple = merge_close_ripples(
+        start_idx_ripple,
+        end_idx_ripple,
+        fs,
+        close_ripple_thresh,
+    )
 
     start_idx_ripple = np.array(start_idx_ripple)
 
@@ -419,7 +562,6 @@ def find_ripples_vicente(lfp,fs,min_duration=0.015,zscore_thresh=5,close_ripple_
         "start_idx": start_idx_ripple,
         "end_idx": end_idx_ripple,
         "peak_idx": None,
-
         "start_time": start_idx_ripple / fs,
         "end_time": end_idx_ripple / fs,
         "peak_time": None,

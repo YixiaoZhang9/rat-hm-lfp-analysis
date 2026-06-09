@@ -8,3 +8,18 @@
 /dataSources.local.xml
 /results/
 
+# Python runtime/cache files
+__pycache__/
+*.py[cod]
+
+# Local analysis outputs and large data artifacts
+training_data/
+trained_networks/
+*.npz
+*.mat
+*.csv
+
+# Model checkpoints/serialized models should be stored outside Git
+*.h5
+*.pkl
+*.pth

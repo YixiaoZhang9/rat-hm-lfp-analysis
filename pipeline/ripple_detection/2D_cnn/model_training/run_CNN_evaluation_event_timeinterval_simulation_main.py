@@ -1,16 +1,13 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from numpy import zeros_like
-
-from demo_application_functions_m import *
-from pathlib import Path
-from torchvision import models
-from detection_evaluation import *
 import math
-from scipy.signal.windows import gaussian
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from demo_application_functions_m import *
+from detection_evaluation import *
 from scipy.ndimage import label
-from scipy.signal import iirnotch,butter, filtfilt, hilbert,convolve, get_window
+from scipy.signal import butter, convolve, filtfilt, hilbert
+from scipy.signal.windows import gaussian
 
 
 def smooth_signal(signal, fs, sigma):
@@ -20,31 +17,46 @@ def smooth_signal(signal, fs, sigma):
     # Create a Gaussian window with a standard deviation
     window_size = smoothing_sigma * 3 * 2
     # in a Gaussian distribution, about 99.7 % of the distribution's area lies within ±3σ.
-    std = (window_size-1)/(2*sigma)
+    std = (window_size - 1) / (2 * sigma)
     gauss_filter = gaussian(window_size, std)
     # Normalize the Gaussian filter
     gauss_filter = gauss_filter / sum(gauss_filter)
     # Apply the filter using convolution
-    smoothed_lfp = convolve(signal, gauss_filter, 'same')
+    smoothed_lfp = convolve(signal, gauss_filter, "same")
     return smoothed_lfp
 
-def filter_lfp(lfp, fs,freq_range):
+
+def filter_lfp(lfp, fs, freq_range):
     # Bandpass filter
-    b, a = butter(4, np.array(freq_range)/(fs/2), btype='band')
+    b, a = butter(4, np.array(freq_range) / (fs / 2), btype="band")
     return filtfilt(b, a, lfp)
 
-#%%
+
+# %%
 # simulated signal
 project_root = Path.cwd().resolve().parents[1]
-sim_root = project_root/"data"/"simulation"
-out_dir_root =  sim_root/"spectral_image"/"main"/"evaluation"
+sim_root = project_root / "data" / "simulation"
+out_dir_root = sim_root / "spectral_image" / "main" / "evaluation"
 
 
 snr_list = [-10, -5, 0, 5]
 noise_types = {
-    "baseline": {'brown': 0.2, 'pink': 0.7, 'white': 0.1, 'powerline': 0, 'emg': 0},
-    "baseline_powerline": {'brown': 0.15,'pink':0.55,'white': 0.1,'powerline': 0.2,'emg': 0},
-    "baseline_powerline_emg": {'brown': 0.1,'pink':0.5,'white': 0.1,'powerline': 0.2,'emg': 0.1}}
+    "baseline": {"brown": 0.2, "pink": 0.7, "white": 0.1, "powerline": 0, "emg": 0},
+    "baseline_powerline": {
+        "brown": 0.15,
+        "pink": 0.55,
+        "white": 0.1,
+        "powerline": 0.2,
+        "emg": 0,
+    },
+    "baseline_powerline_emg": {
+        "brown": 0.1,
+        "pink": 0.5,
+        "white": 0.1,
+        "powerline": 0.2,
+        "emg": 0.1,
+    },
+}
 
 test_filr_records = []
 
@@ -69,15 +81,19 @@ for snr in snr_list:
         val_count = max(1, math.floor(len(npz_files) * 0.1))
         test_count = max(1, math.floor(len(npz_files) * 0.1))
 
-        test_files = npz_files[train_count + val_count:train_count + val_count + test_count]
+        test_files = npz_files[
+            train_count + val_count : train_count + val_count + test_count
+        ]
 
         for file in test_files:
-            test_filr_records.append({
-                "snr": snr,
-                "noise_name": noise_name,
-                "file": file,
-                "out_dir": out_dir_root / f"SNR{snr}" / noise_name,
-            })
+            test_filr_records.append(
+                {
+                    "snr": snr,
+                    "noise_name": noise_name,
+                    "file": file,
+                    "out_dir": out_dir_root / f"SNR{snr}" / noise_name,
+                }
+            )
 
 print(f"collect {len(test_filr_records)} npz files in test dataset.")
 
@@ -104,7 +120,7 @@ for record in test_filr_records:
     condition_key = (snr, noise_name)
 
     if condition_key not in condition_stats:
-        condition_stats[condition_key] = {"TP": 0,"FP": 0,"FN": 0,"n_files": 0}
+        condition_stats[condition_key] = {"TP": 0, "FP": 0, "FN": 0, "n_files": 0}
 
     print(f"\nProcessing file: {file}")
     print(f"Condition: SNR={snr}, noise={noise_name}")
@@ -117,11 +133,27 @@ for record in test_filr_records:
 
     os.makedirs(out_image_path, exist_ok=True)
 
-    start_time_dict, stop_time_dict = make_spectra_image_files(lfp,time,out_dir=out_image_path,fs = fs, segment_ms=window_ms,overlap=overlap,
-                                                               f_min=f_min,f_max=f_max,width=1.0,decim=1,log_power=True,smooth_sigma=1)
+    start_time_dict, stop_time_dict = make_spectra_image_files(
+        lfp,
+        time,
+        out_dir=out_image_path,
+        fs=fs,
+        segment_ms=window_ms,
+        overlap=overlap,
+        f_min=f_min,
+        f_max=f_max,
+        width=1.0,
+        decim=1,
+        log_power=True,
+        smooth_sigma=1,
+    )
 
-    test_df = compute_CNN(image_path=out_image_path, start_time_dict=start_time_dict, stop_time_dict=stop_time_dict,
-                          model_path=model_path)
+    test_df = compute_CNN(
+        image_path=out_image_path,
+        start_time_dict=start_time_dict,
+        stop_time_dict=stop_time_dict,
+        model_path=model_path,
+    )
 
     # %%
     # find index of the image with detected ripples
@@ -163,7 +195,7 @@ for record in test_filr_records:
     pad = int(0.05 * fs)  # 50 ms padding
     min_dur = 25  # ms
     max_dur = 200  # ms
-    merge_gap = int(round(0.01 * fs)) # 10ms
+    merge_gap = int(round(0.01 * fs))  # 10ms
 
     detected_events = []
     Y_cont_pred_binary = np.zeros(len(lfp), dtype=int)
@@ -172,13 +204,12 @@ for record in test_filr_records:
         start_t, stop_t = interval
 
         start_idx = max(0, int(round(start_t * fs)) - pad)
-        stop_idx = min(len(zscored_envelope) - 1,
-                       int(round(stop_t * fs)) + pad)
+        stop_idx = min(len(zscored_envelope) - 1, int(round(stop_t * fs)) + pad)
 
         if stop_idx <= start_idx:
             continue
 
-        segment = zscored_envelope[start_idx:stop_idx + 1]
+        segment = zscored_envelope[start_idx : stop_idx + 1]
 
         # find the ripple candidate
         mask = segment > high_th
@@ -206,11 +237,7 @@ for record in test_filr_records:
             while offset < stop_idx and zscored_envelope[offset] > low_th:
                 offset += 1
 
-            candidates.append({
-                "onset": onset,
-                "offset": offset,
-                "peak": peak_idx
-            })
+            candidates.append({"onset": onset, "offset": offset, "peak": peak_idx})
 
         if len(candidates) == 0:
             continue
@@ -228,8 +255,12 @@ for record in test_filr_records:
                 new_event = {
                     "onset": prev["onset"],
                     "offset": max(prev["offset"], curr["offset"]),
-                    "peak": prev["peak"] if zscored_envelope[prev["peak"]] >= zscored_envelope[curr["peak"]] else curr[
-                        "peak"]
+                    "peak": (
+                        prev["peak"]
+                        if zscored_envelope[prev["peak"]]
+                        >= zscored_envelope[curr["peak"]]
+                        else curr["peak"]
+                    ),
                 }
                 merged[-1] = new_event
             else:
@@ -246,26 +277,32 @@ for record in test_filr_records:
             if duration_ms < min_dur or duration_ms > max_dur:
                 continue
 
-            Y_cont_pred_binary[onset:offset + 1] = 1
+            Y_cont_pred_binary[onset : offset + 1] = 1
 
-            detected_events.append({
-                "ripple_start": onset,
-                "ripple_peak": peak_idx,
-                "ripple_end": offset,
-            })
+            detected_events.append(
+                {
+                    "ripple_start": onset,
+                    "ripple_peak": peak_idx,
+                    "ripple_end": offset,
+                }
+            )
 
     detected_events_df = pd.DataFrame(detected_events)
-
 
     # event-based evaluation
     # TPs, FPs, FNs, stats = get_tps_fps_fns_event_based(zscored_envelope.flatten(), true_ripple[:, 0], true_ripple[:, 1],
     #                                                    detected_events_df["ripple_peak"].to_numpy())
 
-
     # time-interval based evaluation
-    TPs, FPs, FNs, stats = get_tps_fps_fns_time_interval_based(zscored_envelope.flatten(),Y_cont_pred_binary,true_ripple[:, 0],
-                                                              true_ripple[:, 1],ripple_peaks,iou_threshold=0.5,peak_tol=10)
-
+    TPs, FPs, FNs, stats = get_tps_fps_fns_time_interval_based(
+        zscored_envelope.flatten(),
+        Y_cont_pred_binary,
+        true_ripple[:, 0],
+        true_ripple[:, 1],
+        ripple_peaks,
+        iou_threshold=0.5,
+        peak_tol=10,
+    )
 
     ##---------------------------- save the detected results--------------------------------
     save_dir = file.parent
@@ -274,7 +311,6 @@ for record in test_filr_records:
     # save to csv
     detected_events_df.to_csv(save_path, index=False)
     print(f"ripplenet saved CSV -> {save_path}")
-
 
     # Add metadata for later grouping
     stats = stats.copy()
@@ -288,24 +324,37 @@ for record in test_filr_records:
     print(stats.to_string(index=False))
 
     # convert to counts if returned objects are lists
-    tp_count = len(TPs) if hasattr(TPs, "__len__") and not isinstance(TPs, (int, np.integer)) else int(TPs)
-    fp_count = len(FPs) if hasattr(FPs, "__len__") and not isinstance(FPs, (int, np.integer)) else int(FPs)
-    fn_count = len(FNs) if hasattr(FNs, "__len__") and not isinstance(FNs, (int, np.integer)) else int(FNs)
-
+    tp_count = (
+        len(TPs)
+        if hasattr(TPs, "__len__") and not isinstance(TPs, (int, np.integer))
+        else int(TPs)
+    )
+    fp_count = (
+        len(FPs)
+        if hasattr(FPs, "__len__") and not isinstance(FPs, (int, np.integer))
+        else int(FPs)
+    )
+    fn_count = (
+        len(FNs)
+        if hasattr(FNs, "__len__") and not isinstance(FNs, (int, np.integer))
+        else int(FNs)
+    )
 
     condition_stats[condition_key]["TP"] = tp_count
     condition_stats[condition_key]["FP"] = fp_count
     condition_stats[condition_key]["FN"] = fn_count
     condition_stats[condition_key]["n_files"] = 1
 
-    file_level_results.append({
-        "snr": snr,
-        "noise_name": noise_name,
-        "file": file.name,
-        "TP": tp_count,
-        "FP": fp_count,
-        "FN": fn_count,
-    })
+    file_level_results.append(
+        {
+            "snr": snr,
+            "noise_name": noise_name,
+            "file": file.name,
+            "TP": tp_count,
+            "FP": fp_count,
+            "FN": fn_count,
+        }
+    )
 
 
 # %%
@@ -323,19 +372,25 @@ for (snr, noise_name), counts in sorted(condition_stats.items()):
 
     precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
     recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) > 0
+        else 0.0
+    )
 
-    summary_rows.append({
-        "snr": snr,
-        "noise_name": noise_name,
-        "n_files": counts["n_files"],
-        "TP": TP,
-        "FP": FP,
-        "FN": FN,
-        "precision": precision,
-        "recall": recall,
-        "F1": f1,
-    })
+    summary_rows.append(
+        {
+            "snr": snr,
+            "noise_name": noise_name,
+            "n_files": counts["n_files"],
+            "TP": TP,
+            "FP": FP,
+            "FN": FN,
+            "precision": precision,
+            "recall": recall,
+            "F1": f1,
+        }
+    )
 
     overall_TP += TP
     overall_FP += FP
@@ -343,24 +398,33 @@ for (snr, noise_name), counts in sorted(condition_stats.items()):
 
 summary_df = pd.DataFrame(summary_rows)
 
-overall_precision = overall_TP / (overall_TP + overall_FP) if (overall_TP + overall_FP) > 0 else 0.0
-overall_recall = overall_TP / (overall_TP + overall_FN) if (overall_TP + overall_FN) > 0 else 0.0
+overall_precision = (
+    overall_TP / (overall_TP + overall_FP) if (overall_TP + overall_FP) > 0 else 0.0
+)
+overall_recall = (
+    overall_TP / (overall_TP + overall_FN) if (overall_TP + overall_FN) > 0 else 0.0
+)
 overall_f1 = (
     2 * overall_precision * overall_recall / (overall_precision + overall_recall)
-    if (overall_precision + overall_recall) > 0 else 0.0
+    if (overall_precision + overall_recall) > 0
+    else 0.0
 )
 
-overall_df = pd.DataFrame([{
-    "snr": "ALL",
-    "noise_name": "ALL",
-    "n_files": sum(v["n_files"] for v in condition_stats.values()),
-    "TP": overall_TP,
-    "FP": overall_FP,
-    "FN": overall_FN,
-    "precision": overall_precision,
-    "recall": overall_recall,
-    "F1": overall_f1,
-}])
+overall_df = pd.DataFrame(
+    [
+        {
+            "snr": "ALL",
+            "noise_name": "ALL",
+            "n_files": sum(v["n_files"] for v in condition_stats.values()),
+            "TP": overall_TP,
+            "FP": overall_FP,
+            "FN": overall_FN,
+            "precision": overall_precision,
+            "recall": overall_recall,
+            "F1": overall_f1,
+        }
+    ]
+)
 
 print("\nPer-condition results:")
 print(summary_df)
@@ -374,9 +438,7 @@ print(overall_df)
 # pd.DataFrame(file_level_results).to_csv(project_root / "file_level_metrics.csv", index=False)
 
 
-
-
-#%%
+# %%
 #
 # '''
 # # Event-based evaluation
@@ -385,7 +447,3 @@ print(overall_df)
 #
 # # time-interval based evaluation
 # TPs, FPs, FNs, stats = get_tps_fps_fns_time_interval_based(zscored_envelope.flatten(), Y_cont_pred_binary, true_ripple[:,0], true_ripple[:,1], ripple_peaks, iou_threshold = 0.5,peak_tol=10)
-
-
-
-

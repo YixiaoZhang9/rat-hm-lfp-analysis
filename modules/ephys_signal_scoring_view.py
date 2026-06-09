@@ -1,10 +1,15 @@
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QSlider, QPushButton, QSizePolicy
-)
-from PyQt5.QtCore import Qt
-import pyqtgraph as pg
 import numpy as np
+import pyqtgraph as pg
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 class SignalPlotViewer(QWidget):
@@ -66,8 +71,16 @@ class SignalPlotViewer(QWidget):
         self.offsets = np.arange(self.num_channels) * self.offset_step
 
         self.colors = [
-            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+            "#1f77b4",
+            "#ff7f0e",
+            "#2ca02c",
+            "#d62728",
+            "#9467bd",
+            "#8c564b",
+            "#e377c2",
+            "#7f7f7f",
+            "#bcbd22",
+            "#17becf",
         ]
 
         for i in range(self.num_channels):
@@ -76,7 +89,9 @@ class SignalPlotViewer(QWidget):
             self.curves.append(curve)
 
         # Y-axis labels
-        ticks = [(offset, name) for offset, name in zip(self.offsets, self.channel_names)]
+        ticks = [
+            (offset, name) for offset, name in zip(self.offsets, self.channel_names)
+        ]
         self.plot.getAxis("left").setTicks([ticks])
 
         main_layout.addWidget(self.plot)
@@ -113,9 +128,12 @@ class SignalPlotViewer(QWidget):
         self.btn_zoom_out_amp = QPushButton("- Amp")
 
         for btn in [
-            self.btn_left, self.btn_right,
-            self.btn_zoom_in_time, self.btn_zoom_out_time,
-            self.btn_zoom_in_amp, self.btn_zoom_out_amp,
+            self.btn_left,
+            self.btn_right,
+            self.btn_zoom_in_time,
+            self.btn_zoom_out_time,
+            self.btn_zoom_in_amp,
+            self.btn_zoom_out_amp,
         ]:
             btn.setStyleSheet(button_style)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -130,7 +148,8 @@ class SignalPlotViewer(QWidget):
         # Time label
         self.label_time = QLabel("Time: 0.00 s")
         self.label_time.setAlignment(Qt.AlignCenter)
-        self.label_time.setStyleSheet("""
+        self.label_time.setStyleSheet(
+            """
             QLabel {
                 color: black;
                 font-weight: bold;
@@ -141,7 +160,8 @@ class SignalPlotViewer(QWidget):
                 border-radius: 3px;
                 padding: 3px;
             }
-        """)
+        """
+        )
 
         controls_layout.addWidget(self.btn_left)
         controls_layout.addWidget(self.label_time)
@@ -167,7 +187,7 @@ class SignalPlotViewer(QWidget):
         """Update signal display for the current window."""
         self.start_idx = self.slider.value()
         end_idx = min(self.start_idx + self.win_len, self.total_len)
-        t_window = self.time[self.start_idx:end_idx]
+        t_window = self.time[self.start_idx : end_idx]
 
         # Update time label
         self.label_time.setText(f"Time: {t_window[0]:.2f} - {t_window[-1]:.2f} s")
@@ -181,7 +201,7 @@ class SignalPlotViewer(QWidget):
 
         # ---- Draw each channel ----
         for i, ch in enumerate(self.channel_names):
-            data = self.data_dict[ch][self.start_idx:end_idx]
+            data = self.data_dict[ch][self.start_idx : end_idx]
 
             if ch.lower() == "scoring":
                 scaled = data + self.offsets[i]
@@ -194,18 +214,24 @@ class SignalPlotViewer(QWidget):
 
                 # draw sparse labels
                 for idx in range(0, len(data), max(1, len(data) // 5)):
-                    text = pg.TextItem(str(int(data[idx])), color="r", anchor=(0.5, 1.0))
+                    text = pg.TextItem(
+                        str(int(data[idx])), color="r", anchor=(0.5, 1.0)
+                    )
                     text.setPos(t_window[idx], scaled[idx])
                     self.plot.addItem(text)
                     self.scoring_text_items.append(text)
 
             else:
                 ptp = np.ptp(data) or 1
-                scaled = (data / ptp) * self.offset_step * 0.8 * self.amplitude_scale + self.offsets[i]
+                scaled = (
+                    data / ptp
+                ) * self.offset_step * 0.8 * self.amplitude_scale + self.offsets[i]
                 self.curves[i].setData(t_window, scaled)
 
         self.plot.setXRange(t_window[0], t_window[-1], padding=0)
-        self.plot.setYRange(-self.offset_step, self.offsets[-1] + self.offset_step, padding=0.1)
+        self.plot.setYRange(
+            -self.offset_step, self.offsets[-1] + self.offset_step, padding=0.1
+        )
 
         self.update_event_regions()
 
@@ -217,8 +243,12 @@ class SignalPlotViewer(QWidget):
         self.update_plot()
 
     def move_right(self):
-        self.slider.setValue(min(self.slider.value() + int(self.win_len / 10),
-                                 self.total_len - self.win_len))
+        self.slider.setValue(
+            min(
+                self.slider.value() + int(self.win_len / 10),
+                self.total_len - self.win_len,
+            )
+        )
         self.update_plot()
 
     # ----------------------------------------------------------------------
@@ -272,9 +302,7 @@ class SignalPlotViewer(QWidget):
             t_end = self.time[min(end, win_end)]
 
             region = pg.LinearRegionItem(
-                values=(t_start, t_end),
-                brush=pg.mkBrush(255, 0, 0, 50),
-                movable=False
+                values=(t_start, t_end), brush=pg.mkBrush(255, 0, 0, 50), movable=False
             )
             region.setZValue(-10)
             self.plot.addItem(region)

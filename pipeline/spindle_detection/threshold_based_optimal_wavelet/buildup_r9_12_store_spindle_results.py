@@ -1,20 +1,20 @@
 # ---- Import ----
-import re
 import os
+import re
+
 import numpy as np
-from scipy.io import loadmat
-import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import QApplication
-import sys
-from modules.ephys_signal_scoring_view import SignalPlotViewer
 import pandas as pd
-from scipy.signal import iirnotch,butter, filtfilt, hilbert,convolve, get_window
+from scipy.io import loadmat
+from scipy.signal import butter, filtfilt
+
 from modules.find_spindles_lfp_Antoine_lab import spindle_detection_wavelet
 
-def filter_lfp(lfp, fs,freq_range):
+
+def filter_lfp(lfp, fs, freq_range):
     # Bandpass filter
-    b, a = butter(4, np.array(freq_range)/(fs/2), btype='band')
+    b, a = butter(4, np.array(freq_range) / (fs / 2), btype="band")
     return filtfilt(b, a, lfp)
+
 
 def find_bouts(scoring_data, target_value=3, fs=1000):
     """
@@ -44,8 +44,9 @@ def find_bouts(scoring_data, target_value=3, fs=1000):
     starts = np.where(diff == 1)[0]
     ends = np.where(diff == -1)[0]
 
-    bouts = [(s*fs, e*fs) for s, e in zip(starts, ends)]
+    bouts = [(s * fs, e * fs) for s, e in zip(starts, ends)]
     return bouts
+
 
 def find_non_nrem_bouts(scoring_data, nrem_value=3, fs=1000):
 
@@ -58,36 +59,44 @@ def find_non_nrem_bouts(scoring_data, nrem_value=3, fs=1000):
     starts = np.where(diff == 1)[0]
     ends = np.where(diff == -1)[0]
 
-    bouts = [(s*fs, e*fs) for s, e in zip(starts, ends)]
+    bouts = [(s * fs, e * fs) for s, e in zip(starts, ends)]
 
     return bouts
 
+
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = '/media/yixiao/Data4/'
-dir_R9_12_Data = os.path.join(dir_base1,'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData')
-dir_R9_12_Scoring = os.path.join(dir_base1, 'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Scoring')
-dir_output = os.path.join(dir_base1,'Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Spindle_detection_results')
+dir_base1 = "/media/yixiao/Data4/"
+dir_R9_12_Data = os.path.join(
+    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData"
+)
+dir_R9_12_Scoring = os.path.join(
+    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Scoring"
+)
+dir_output = os.path.join(
+    dir_base1,
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Spindle_detection_results",
+)
 
 
-rats = np.arange(9,13)
-regions = ['HPC','PL','RSC']
-sleep_periods = ['presleep','postsleep']
-fs = 1000 # downsampled sample frequency
+rats = np.arange(9, 13)
+regions = ["HPC", "PL", "RSC"]
+sleep_periods = ["presleep", "postsleep"]
+fs = 1000  # downsampled sample frequency
 
 f_plot = 0
 Threshold_across_time = {}
 NREM_duration_across_time = {}
 
 
-#%%
+# %%
 
-#grid search
+# grid search
 thrL_grid = [0.5, 0.8, 1.0, 1.2]
 thrH_grid = [2.0, 2.5, 3.0]
 
 # detect spindles
 for rat in rats:
-    rat_str = f'rat{rat}'
+    rat_str = f"rat{rat}"
 
     for region in regions:
         print(f"\n===== Processing {rat_str} region :{region} =====")
@@ -97,13 +106,14 @@ for rat in rats:
             print(f"Missing: {dir_R9_12_Data_perday}")
             continue
 
-        folders_SD = [name for name in os.listdir(dir_R9_12_Data_perday)
-                      if os.path.isdir(os.path.join(dir_R9_12_Data_perday, name))]
+        folders_SD = [
+            name
+            for name in os.listdir(dir_R9_12_Data_perday)
+            if os.path.isdir(os.path.join(dir_R9_12_Data_perday, name))
+        ]
 
         for studyday in folders_SD:
-
             for sleep_period in sleep_periods:
-
                 print(f"Processing {rat_str} | {studyday} | {sleep_period}")
 
                 dir_trial = os.path.join(dir_R9_12_Data_perday, studyday, sleep_period)
@@ -124,57 +134,64 @@ for rat in rats:
                     continue
 
                 # load sleep scoring files
-                path_scoring = os.path.join(dir_R9_12_Scoring, str(rat), str(studyday), sleep_period)
+                path_scoring = os.path.join(
+                    dir_R9_12_Scoring, str(rat), str(studyday), sleep_period
+                )
 
                 if not os.path.exists(path_scoring):
                     print(f"Missing scoring: {path_scoring}")
                     continue
 
-                scoring_files = [f for f in os.listdir(path_scoring) if f.endswith(".mat")]
+                scoring_files = [
+                    f for f in os.listdir(path_scoring) if f.endswith(".mat")
+                ]
 
                 # process each trial
                 for trial_name in matched_files:
-
                     print(f"  Trial: {os.path.basename(trial_name)}")
 
                     trial_data = loadmat(trial_name)
-                    data = trial_data['data'].squeeze()
+                    data = trial_data["data"].squeeze()
 
                     # matched sleep scoring files
                     if len(scoring_files) == 1:
-                        scoring_data = loadmat(os.path.join(path_scoring, scoring_files[0]))['states'].squeeze()
+                        scoring_data = loadmat(
+                            os.path.join(path_scoring, scoring_files[0])
+                        )["states"].squeeze()
                     else:
-                        match = re.search(r'_(\d+)\.mat$', trial_name)
+                        match = re.search(r"_(\d+)\.mat$", trial_name)
                         if not match:
                             print("No matching scoring file")
                             continue
 
                         suffix = match.group(1).zfill(2)
-                        pattern = re.compile(rf'_{suffix}_')
+                        pattern = re.compile(rf"_{suffix}_")
 
                         scoring_data = None
                         for f in scoring_files:
                             if pattern.search(f):
-                                scoring_data = loadmat(os.path.join(path_scoring, f))['states'].squeeze()
+                                scoring_data = loadmat(os.path.join(path_scoring, f))[
+                                    "states"
+                                ].squeeze()
                                 break
 
                         if scoring_data is None:
                             print("No scoring matched")
                             continue
 
-
                     # find NREM bouts
                     NREM_bouts = find_bouts(scoring_data, target_value=3, fs=fs)
                     # find non-NREM bouts
-                    nonNREM_bouts = find_non_nrem_bouts(scoring_data, nrem_value=3, fs=fs)
+                    nonNREM_bouts = find_non_nrem_bouts(
+                        scoring_data, nrem_value=3, fs=fs
+                    )
                     # filter
                     filtered_data = filter_lfp(data, fs, [0.3, 35])
 
                     # grid search
                     for thrL in thrL_grid:
-
                         for thrH in thrH_grid:
-                            print(f"thrL={thrL} | "f"thrH={thrH}")
+                            print(f"thrL={thrL} | thrH={thrH}")
 
                             # storage
                             spindle_start_list = []
@@ -183,20 +200,23 @@ for rat in rats:
                             spindle_duration_list = []
                             nrem_duration_list = []
 
-                            for (start_sample, end_sample) in NREM_bouts:
-
+                            for start_sample, end_sample in NREM_bouts:
                                 bout_duration_sec = (end_sample - start_sample) / fs
                                 bout_data = filtered_data[start_sample:end_sample]
                                 bout_raw_data = data[start_sample:end_sample]
                                 # the imput data require
 
-                                spindles = spindle_detection_wavelet(bout_raw_data,bout_data, fs,thrL = thrL, thrH = thrH)
+                                spindles = spindle_detection_wavelet(
+                                    bout_raw_data, bout_data, fs, thrL=thrL, thrH=thrH
+                                )
 
-                                spindle_list = list(zip(
-                                    (spindles[:, 0] + start_sample).astype(int),
-                                    (spindles[:, 1] + start_sample).astype(int),
-                                    (spindles[:, 2] + start_sample).astype(int)
-                                ))
+                                spindle_list = list(
+                                    zip(
+                                        (spindles[:, 0] + start_sample).astype(int),
+                                        (spindles[:, 1] + start_sample).astype(int),
+                                        (spindles[:, 2] + start_sample).astype(int),
+                                    )
+                                )
 
                                 # store each spindle
                                 for spindle in spindle_list:
@@ -212,40 +232,47 @@ for rat in rats:
 
                             # save CSV
                             if len(spindle_start_list) > 0:
-                                df = pd.DataFrame({
-                                    "spindle_start": spindle_start_list,
-                                    "spindle_peak" : spindle_peak_list,
-                                    "spindle_end": spindle_end_list,
-                                    "spindle_duration_sec": spindle_duration_list,
-                                    "nrem_bout_duration_sec": nrem_duration_list
-                                })
+                                df = pd.DataFrame(
+                                    {
+                                        "spindle_start": spindle_start_list,
+                                        "spindle_peak": spindle_peak_list,
+                                        "spindle_end": spindle_end_list,
+                                        "spindle_duration_sec": spindle_duration_list,
+                                        "nrem_bout_duration_sec": nrem_duration_list,
+                                    }
+                                )
                             else:
-                                df = pd.DataFrame(columns=[
-                                    "spindle_start",
-                                    "spindle_end",
-                                    "spindle_duration_sec",
-                                    "nrem_bout_duration_sec"
-                                ])
+                                df = pd.DataFrame(
+                                    columns=[
+                                        "spindle_start",
+                                        "spindle_end",
+                                        "spindle_duration_sec",
+                                        "nrem_bout_duration_sec",
+                                    ]
+                                )
 
                             # output path
-                            output_dir = os.path.join(dir_output, region, str(rat),
-                                                      studyday, sleep_period,
-                                                      f"wavelet_optimal_thrL_{thrL}_thrH_{thrH}")
+                            output_dir = os.path.join(
+                                dir_output,
+                                region,
+                                str(rat),
+                                studyday,
+                                sleep_period,
+                                f"wavelet_optimal_thrL_{thrL}_thrH_{thrH}",
+                            )
 
                             os.makedirs(output_dir, exist_ok=True)
 
                             trial_id = os.path.basename(trial_name).replace(".mat", "")
 
-                            save_path = os.path.join(output_dir, f"{trial_id}_spindles_wavelet_optimal.csv")
+                            save_path = os.path.join(
+                                output_dir, f"{trial_id}_spindles_wavelet_optimal.csv"
+                            )
 
                             df.to_csv(save_path, index=False)
 
-                            print(f"Saved: " f"{len(df)} spindles -> {save_path}")
+                            print(f"Saved: {len(df)} spindles -> {save_path}")
 
 print("\n Done!")
 
-#%%
-
-
-
-
+# %%
