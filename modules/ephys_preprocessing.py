@@ -11,9 +11,9 @@ matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
 from PyQt5.QtWidgets import QApplication
 import sys
-from ephys_signal_view import SignalPlotViewer
+from modules.ephys_signal_view import SignalPlotViewer
 from collections import defaultdict
-import powerline_noise_removal as powerline
+import modules.powerline_noise_removal as powerline
 import math
 import glob
 

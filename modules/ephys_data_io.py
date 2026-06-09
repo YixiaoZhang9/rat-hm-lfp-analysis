@@ -3,7 +3,7 @@
 import os
 import re
 import pandas as pd
-import OpenEphys
+from modules import OpenEphys
 from scipy.io import savemat
 
 #--------------------------------------------------------------------

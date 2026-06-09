@@ -2,7 +2,7 @@
 import os
 import re
 import numpy as np
-from modules import OpenEphys, Functions_EphysData_Storing as fstore, ephys_preprocessing as processing
+from modules import OpenEphys, ephys_data_io as fstore, ephys_preprocessing as processing
 from PyQt5.QtWidgets import QApplication
 import sys
 from modules.ephys_signal_view import SignalPlotViewer
@@ -30,7 +30,7 @@ data_filtered = {}
 
 for rat in [rats[2]]:
 
-    for region in [regions[0]]:
+    for region in [regions[1]]:
 
         for channel in channels:
 
