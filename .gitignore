@@ -12,9 +12,12 @@
 __pycache__/
 *.py[cod]
 
+#pycharm
+.idea/
+
 # Local analysis outputs and large data artifacts
 config.yaml
-archive/ripple_manual_annotation/
+archive/
 training_data/
 trained_networks/
 *.npz
