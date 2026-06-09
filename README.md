@@ -19,7 +19,7 @@ pipeline/02_preprocessing/
 pipeline/delta_detection/
 pipeline/ripple_detection/
 pipeline/spindle_detection/
-ripple_manual_annotation/   Manual ripple annotation and comparison utilities
+archive/                    Local archived scripts; some archived folders are ignored by Git
 configs/                    Example local path and rat-group configuration
 scripts/                    Thin command-line wrappers for running existing workflow scripts
 matlab/                     MATLAB helpers, if separated from workflow folders later
@@ -95,9 +95,9 @@ Ignored artifact types include:
 Formatting and import cleanup are configured in `pyproject.toml`:
 
 ```bash
-python -m ruff format modules pipeline ripple_manual_annotation archive scripts
-python -m ruff check modules pipeline ripple_manual_annotation archive scripts
-python -m compileall -q modules pipeline ripple_manual_annotation archive scripts
+python -m ruff format modules pipeline archive scripts
+python -m ruff check modules pipeline archive scripts
+python -m compileall -q modules pipeline archive scripts
 ```
 
 Before opening a pull request, run the checks above and confirm that no private
