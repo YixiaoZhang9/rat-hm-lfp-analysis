@@ -25,12 +25,10 @@ This script performs the following preprocessing steps on the dataset:
 
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base = get_path("R1_8_root")
-dir_R1_4_RawData = os.path.join(
-    dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/RawData"
-)
+dir_R1_4_RawData = os.path.join(dir_base, "Rat_HM_Ephys_TD_Analysis_R1_8/R1-4/RawData")
 
 dir_R1_4_PreprocessedData = os.path.join(
-    dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData"
+    dir_base, "Rat_HM_Ephys_TD_Analysis_R1_8/R1-4/PreprocessedData"
 )
 # this folder will store the preprocessed data
 

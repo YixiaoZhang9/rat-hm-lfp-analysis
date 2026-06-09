@@ -11,12 +11,10 @@ importlib.reload(fstore)
 
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base = get_path("R9_16_root")
-dir_R13_16_Data = os.path.join(
-    dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_OpenEphysRecordings_R13-16/"
-)
+dir_R13_16_Data = os.path.join(dir_base, "Rat_HM_Ephys_TD_OpenEphysRecordings_R13-16/")
 dir_results_base = get_path("R9_16_root")
 dir_R13_16_results = os.path.join(
-    dir_results_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/"
+    dir_results_base, "Rat_HM_Ephys_TD_Analysis_R9_16/R13-16/"
 )
 path_csv_SelectedChannel = os.path.join(
     dir_R13_16_results, "Rat_HM_Ephys_TD_R9_16_SelectedChannel.csv"

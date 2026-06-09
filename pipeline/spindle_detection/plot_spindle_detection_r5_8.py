@@ -19,14 +19,12 @@ from pipeline.spindle_detection.signal_viewer import SpindleViewer
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base1 = get_path("R1_8_root")
 dir_R5_8_Data = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData"
+    dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R5-8/PreprocessedData"
 )
-dir_R5_8_Scoring = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring"
-)
+dir_R5_8_Scoring = os.path.join(dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R5-8/Scoring")
 dir_R5_8_Spindle = os.path.join(
     dir_base1,
-    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Spindle_detection_results",
+    "Rat_HM_Ephys_TD_Analysis_R1_8/R5-8/Spindle_detection_results",
 )
 
 

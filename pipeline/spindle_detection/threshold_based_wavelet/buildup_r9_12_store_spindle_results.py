@@ -68,14 +68,14 @@ def find_non_nrem_bouts(scoring_data, nrem_value=3, fs=1000):
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base1 = get_path("R9_16_root")
 dir_R9_12_Data = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData"
+    dir_base1, "Rat_HM_Ephys_TD_Analysis_R9_16/R9-12/PreprocessedData"
 )
 dir_R9_12_Scoring = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Scoring"
+    dir_base1, "Rat_HM_Ephys_TD_Analysis_R9_16/R9-12/Scoring"
 )
 dir_output = os.path.join(
     dir_base1,
-    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Spindle_detection_results",
+    "Rat_HM_Ephys_TD_Analysis_R9_16/R9-12/Spindle_detection_results",
 )
 
 

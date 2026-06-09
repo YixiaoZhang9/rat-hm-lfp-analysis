@@ -16,9 +16,7 @@ from modules.project_config import get_path
 
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base1 = get_path("R1_8_root")
-dir_data_root = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4"
-)
+dir_data_root = os.path.join(dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R1-4")
 dir_R1_4_Data = os.path.join(dir_data_root, "PreprocessedData")
 dir_R1_4_Scoring = os.path.join(dir_data_root, "Scoring")
 dir_R1_4_Ripple = os.path.join(dir_data_root, "Ripple_detection_results")

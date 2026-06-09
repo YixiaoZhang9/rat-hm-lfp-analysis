@@ -38,7 +38,7 @@ Create a Python environment and install the dependencies:
 python -m pip install -r requirements.txt
 ```
 
-Some workflows also require MATLAB, PyQt, TensorFlow, PyTorch, trained model
+Some workflows also require PyQt, TensorFlow, PyTorch, trained model
 files, or local training data. Model files and data files are not stored in
 Git.
 
@@ -57,9 +57,9 @@ Then edit `config.yaml`:
 
 ```yaml
 paths:
-  R1_8_root: /path/to/GL14_RAT_FA
-  R9_16_root: /path/to/Data4
-  R1_8_Raw_root: /path/to/Data5
+  R1_8_root: /path/to/GL14_RAT_FA/Rat_HM_Ephys_TD
+  R9_16_root: /path/to/Data4/Rat_HM_Ephys_TD
+  R1_8_Raw_root: /path/to/Data5/Rat_HM_Ephys_TD
   ripple_marking_root: /path/to/Ripple_Marking
   ripple_training_data: /path/to/training_data
 ```

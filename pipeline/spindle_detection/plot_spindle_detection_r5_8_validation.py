@@ -28,9 +28,7 @@ from modules.threshold_ripple_detection import filter_lfp
 # Paths
 dir_base1 = get_path("R1_8_root")
 
-dir_data_root = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8"
-)
+dir_data_root = os.path.join(dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R5-8")
 dir_R5_8_Data = os.path.join(dir_data_root, "PreprocessedData")
 dir_R5_8_Scoring = os.path.join(dir_data_root, "Scoring")
 dir_R5_8_Spindle = os.path.join(dir_data_root, "Spindle_detection_results")

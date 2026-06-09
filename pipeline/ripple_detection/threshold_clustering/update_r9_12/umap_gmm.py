@@ -94,7 +94,7 @@ plt.show()
 # -------------- plot the ripple --------------------
 dir_base1 = get_path("R9_16_root")
 dir_R9_12_Data = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData"
+    dir_base1, "Rat_HM_Ephys_TD_Analysis_R9_16/R9-12/PreprocessedData"
 )
 fs = 1000
 window_ms = 500

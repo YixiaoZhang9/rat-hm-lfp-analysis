@@ -68,24 +68,20 @@ class TrialSelector(QWidget):
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base1 = get_path("R1_8_root")
 dir_R1_4_Data = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData/HPC"
+    dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R1-4/PreprocessedData/HPC"
 )
-dir_R1_4_Scoring = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Scoring"
-)
+dir_R1_4_Scoring = os.path.join(dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R1-4/Scoring")
 dir_R1_4_Ripple = os.path.join(
     dir_base1,
-    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Ripple_detection_results",
+    "Rat_HM_Ephys_TD_Analysis_R1_8/R1-4/Ripple_detection_results",
 )
 dir_R5_8_Data = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC"
+    dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R5-8/PreprocessedData/HPC"
 )
-dir_R5_8_Scoring = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring"
-)
+dir_R5_8_Scoring = os.path.join(dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R5-8/Scoring")
 dir_R5_8_Ripple = os.path.join(
     dir_base1,
-    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Ripple_detection_results",
+    "Rat_HM_Ephys_TD_Analysis_R1_8/R5-8/Ripple_detection_results",
 )
 
 # the path storing the ripple marking results

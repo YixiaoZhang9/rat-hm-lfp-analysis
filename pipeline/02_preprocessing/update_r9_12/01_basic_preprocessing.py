@@ -23,18 +23,16 @@ This script performs the following preprocessing steps on the dataset:
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base = get_path("R9_16_root")
 dir_R9_12_RawData = os.path.join(
-    dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/RawData"
+    dir_base, "Rat_HM_Ephys_TD_Analysis_R9_16/R9-12/RawData"
 )
-dir_R9_12_Scoring = os.path.join(
-    dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Sleepscoring_results_R9-12"
-)
+dir_R9_12_Scoring = os.path.join(dir_base, "Rat_HM_Ephys_TD_Sleepscoring_results_R9-12")
 
 dir_R9_12_Preprec_withartifacts = os.path.join(
-    dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Preprec_withartifacts"
+    dir_base, "Rat_HM_Ephys_TD_Analysis_R9_16/R9-12/Preprec_withartifacts"
 )
 # this folder will store the preprocessed data
 dir_R9_12_Scoring_withartifacts = os.path.join(
-    dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Scoring"
+    dir_base, "Rat_HM_Ephys_TD_Analysis_R9_16/R9-12/Scoring"
 )
 
 

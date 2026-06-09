@@ -25,11 +25,9 @@ from modules.threshold_ripple_detection import (
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base1 = get_path("R1_8_root")
 dir_R1_4_Data = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData"
+    dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R1-4/PreprocessedData"
 )
-dir_R1_4_Scoring = os.path.join(
-    dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Scoring"
-)
+dir_R1_4_Scoring = os.path.join(dir_base1, "Rat_HM_Ephys_TD_Analysis_R1_8/R1-4/Scoring")
 
 
 rats = np.arange(1, 5)

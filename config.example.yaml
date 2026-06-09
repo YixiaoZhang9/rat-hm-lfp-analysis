@@ -1,12 +1,12 @@
 paths:
-  # Legacy root containing Rat_HM_Ephys_TD_Analysis_New for R1-4 and R5-8.
-  R1_8_root: /media/yixiao/GL14_RAT_FA/
+  # Project root containing Rat_HM_Ephys_TD_Analysis_R1_8 for R1-4 and R5-8.
+  R1_8_root: /media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD
 
-  # Legacy root containing Rat_HM_Ephys_TD_Analysis for R9-12 and R13-16.
-  R9_16_root: /media/yixiao/Data4/
+  # Project root containing Rat_HM_Ephys_TD_Analysis_R9_16 for R9-12 and R13-16.
+  R9_16_root: /media/yixiao/Data4/Rat_HM_Ephys_TD
 
-  # Legacy root used by raw OpenEphys and sleep-scoring input scripts.
-  R1_8_Raw_root: /media/yixiao/Data5/
+  # Project root used by raw OpenEphys and sleep-scoring input scripts.
+  R1_8_Raw_root: /media/yixiao/Data5/Rat_HM_Ephys_TD
 
   # Root folder for manual ripple-marking files.
   ripple_marking_root: /mnt/genzel/Rat/HM/Rat_HM_Ephys_TD/Rat_HM_Ripple_Detection/Ripple_Marking

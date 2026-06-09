@@ -18,9 +18,7 @@ from scipy.signal import filtfilt, iirnotch
 
 # ---- Set base paths, date lists, and constants for data processing ----
 dir_base = get_path("R9_16_root")
-dir_R13_16_Data = os.path.join(
-    dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_OpenEphysRecordings_R13-16/"
-)
+dir_R13_16_Data = os.path.join(dir_base, "Rat_HM_Ephys_TD_OpenEphysRecordings_R13-16/")
 rats = np.arange(13, 17)
 date_prefix = "Rat_HM_Ephys_TD_R13-16_"
 study_day = "20230905"
