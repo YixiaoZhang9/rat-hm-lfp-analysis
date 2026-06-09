@@ -21,7 +21,6 @@ pipeline/ripple_detection/
 pipeline/spindle_detection/
 archive/                    Local archived scripts; some archived folders are ignored by Git
 configs/                    Example local path and rat-group configuration
-scripts/                    Thin command-line wrappers for running existing workflow scripts
 matlab/                     MATLAB helpers, if separated from workflow folders later
 results/                    Local generated outputs; ignored by Git
 ```
@@ -63,21 +62,6 @@ The scripts use `modules.project_config.get_path(...)`, which returns
 `pathlib.Path` objects. Historical local paths are shown only in
 `config.example.yaml`; they are not hard-coded into workflow scripts.
 
-## Running Existing Workflows
-
-The original scripts can still be run directly. A consolidated wrapper is also
-provided for common rat-group workflows:
-
-```bash
-python scripts/run_workflow.py --list
-python scripts/run_workflow.py ripple_threshold buildup_r1_4
-python scripts/run_workflow.py spindle_threshold update_r13_16
-python scripts/run_workflow.py delta buildup_r5_8
-```
-
-The wrapper delegates to the existing scripts; it does not change the analysis
-logic.
-
 ## Data and Model Policy
 
 Do not commit raw LFP data, derived result tables, training datasets, or model
@@ -95,9 +79,9 @@ Ignored artifact types include:
 Formatting and import cleanup are configured in `pyproject.toml`:
 
 ```bash
-python -m ruff format modules pipeline archive scripts
-python -m ruff check modules pipeline archive scripts
-python -m compileall -q modules pipeline archive scripts
+python -m ruff format modules pipeline archive
+python -m ruff check modules pipeline archive
+python -m compileall -q modules pipeline archive
 ```
 
 Before opening a pull request, run the checks above and confirm that no private
