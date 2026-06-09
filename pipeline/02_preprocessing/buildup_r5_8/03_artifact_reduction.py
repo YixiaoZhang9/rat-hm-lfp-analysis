@@ -12,6 +12,7 @@ from modules import ephys_preprocessing as processing
 
 # from Signal_Plot_pyqt import SignalPlotViewer
 from modules.ephys_signal_scoring_view import SignalPlotViewer
+from modules.project_config import get_path
 
 matplotlib.use("Qt5Agg")
 
@@ -25,7 +26,7 @@ This script performs the following preprocessing steps on the dataset:
 """
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/GL14_RAT_FA/"
+dir_base1 = get_path("RAT_HM_GL14_ROOT")
 dir_R5_8_filteredData = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Preprec_withartifacts"
 )

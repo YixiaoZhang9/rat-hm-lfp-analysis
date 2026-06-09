@@ -7,6 +7,7 @@ import numpy as np
 from scipy.io import savemat
 
 from modules import ephys_data_io as fstore
+from modules.project_config import get_path
 
 importlib.reload(fstore)
 
@@ -15,7 +16,7 @@ dir_base = "/media/yixiao/Data5/"
 dir_R1_4_Data = os.path.join(
     dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_OpenEphysRecordings_R1-4/"
 )
-dir_results_base = "/media/yixiao/GL14_RAT_FA/"
+dir_results_base = get_path("RAT_HM_GL14_ROOT")
 dir_R1_4_results = os.path.join(
     dir_results_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/"
 )

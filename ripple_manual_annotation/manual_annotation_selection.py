@@ -6,80 +6,106 @@ import re
 import numpy as np
 from scipy.io import loadmat
 
+from modules.project_config import get_path
+
 # ---- Set base paths ----
 dir_data = {}
-dir_data["rat1"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData/HPC/1/"
+dir_data["rat1"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData/HPC/1/",
 )
-dir_data["rat2"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData/HPC/2/"
+dir_data["rat2"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData/HPC/2/",
 )
-dir_data["rat3"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData/HPC/3/"
+dir_data["rat3"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData/HPC/3/",
 )
-dir_data["rat5"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC/5/"
+dir_data["rat5"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC/5/",
 )
-dir_data["rat6"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC/6/"
+dir_data["rat6"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC/6/",
 )
-dir_data["rat7"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC/7/"
+dir_data["rat7"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC/7/",
 )
-dir_data["rat8"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC/8/"
+dir_data["rat8"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData/HPC/8/",
 )
-dir_data["rat11"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData/HPC/11/"
+dir_data["rat11"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData/HPC/11/",
 )
-dir_data["rat12"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData/HPC/12/"
+dir_data["rat12"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData/HPC/12/",
 )
-dir_data["rat13"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData/HPC/13/"
+dir_data["rat13"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData/HPC/13/",
 )
-dir_data["rat14"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData/HPC/14/"
+dir_data["rat14"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData/HPC/14/",
 )
-dir_data["rat15"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData/HPC/15/"
+dir_data["rat15"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData/HPC/15/",
 )
 dir_scoring = {}
-dir_scoring["rat1"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Scoring/1/"
+dir_scoring["rat1"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Scoring/1/",
 )
-dir_scoring["rat2"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Scoring/2/"
+dir_scoring["rat2"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Scoring/2/",
 )
-dir_scoring["rat3"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Scoring/3/"
+dir_scoring["rat3"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/Scoring/3/",
 )
-dir_scoring["rat5"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring/5/"
+dir_scoring["rat5"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring/5/",
 )
-dir_scoring["rat6"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring/6/"
+dir_scoring["rat6"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring/6/",
 )
-dir_scoring["rat7"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring/7/"
+dir_scoring["rat7"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring/7/",
 )
-dir_scoring["rat8"] = (
-    "/media/yixiao/GL14_RAT_FA/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring/7/"
+dir_scoring["rat8"] = os.path.join(
+    get_path("RAT_HM_GL14_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/Scoring/7/",
 )
-dir_scoring["rat11"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Scoring/11/"
+dir_scoring["rat11"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Scoring/11/",
 )
-dir_scoring["rat12"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Scoring/12/"
+dir_scoring["rat12"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/Scoring/12/",
 )
-dir_scoring["rat13"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Scoring/13/"
+dir_scoring["rat13"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Scoring/13/",
 )
-dir_scoring["rat14"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Scoring/14/"
+dir_scoring["rat14"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Scoring/14/",
 )
-dir_scoring["rat15"] = (
-    "/media/yixiao/Data4/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Scoring/15/"
+dir_scoring["rat15"] = os.path.join(
+    get_path("RAT_HM_DATA4_ROOT"),
+    "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Scoring/15/",
 )
 
 rats = [1, 2, 3, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16]

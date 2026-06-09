@@ -6,6 +6,8 @@ import re
 import numpy as np
 from scipy.io import loadmat, savemat
 
+from modules.project_config import get_path
+
 """
 In some study days, the duration of the recordings and the 
 associated scoring files are shorter than 30min and they do not match. To ensure
@@ -14,7 +16,7 @@ corresponding recording before saving the results.
 """
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/Data4/"
+dir_base1 = get_path("RAT_HM_DATA4_ROOT")
 
 dir_R13_16_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/Preprec_withartifacts"

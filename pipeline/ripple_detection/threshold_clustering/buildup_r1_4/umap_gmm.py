@@ -8,6 +8,7 @@ from scipy.io import loadmat
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
+from modules.project_config import get_path
 from modules.threshold_ripple_detection import filter_lfp
 
 # ===============================================================
@@ -19,7 +20,7 @@ half_window_samples = int(fs * window_ms / 1000)
 n_samples_per_cluster = 10  # Number of sample ripples to plot per cluster
 
 # Base data directory
-dir_base1 = "/media/yixiao/GL14_RAT_FA/"
+dir_base1 = get_path("RAT_HM_GL14_ROOT")
 dir_R1_4_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData"
 )

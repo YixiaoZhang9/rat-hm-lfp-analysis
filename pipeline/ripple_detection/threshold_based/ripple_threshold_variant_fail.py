@@ -11,6 +11,7 @@ from scipy.signal import hilbert
 from scipy.stats import zscore
 
 from modules.ephys_signal_scoring_view import SignalPlotViewer
+from modules.project_config import get_path
 from modules.threshold_ripple_detection import (
     estimate_noise_mirror_threshold,
     filter_lfp,
@@ -30,7 +31,7 @@ from modules.threshold_ripple_detection import (
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/GL14_RAT_FA/"
+dir_base1 = get_path("RAT_HM_GL14_ROOT")
 dir_R1_4_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData"
 )

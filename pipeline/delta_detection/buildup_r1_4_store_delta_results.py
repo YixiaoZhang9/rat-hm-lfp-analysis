@@ -8,6 +8,7 @@ from scipy.io import loadmat
 from scipy.signal import butter, detrend, sosfiltfilt
 
 from modules.find_deltas_lfp import find_deltas_lfp
+from modules.project_config import get_path
 
 
 def filter_lfp(lfp, fs, band):
@@ -49,7 +50,7 @@ def find_bouts(scoring_data, target_value=3, fs=1000):
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/GL14_RAT_FA/"
+dir_base1 = get_path("RAT_HM_GL14_ROOT")
 dir_R1_4_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData"
 )

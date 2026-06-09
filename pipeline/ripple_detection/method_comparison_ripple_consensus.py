@@ -8,6 +8,8 @@ import seaborn as sns
 from pandas.errors import EmptyDataError
 from scipy.io import loadmat
 
+from modules.project_config import get_path
+
 
 def match_events(gt_df, pred_df, iou_th=0.5):
 
@@ -181,7 +183,7 @@ def safe_read_csv(path):
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/GL14_RAT_FA/"
+dir_base1 = get_path("RAT_HM_GL14_ROOT")
 dir_R1_4_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData"
 )

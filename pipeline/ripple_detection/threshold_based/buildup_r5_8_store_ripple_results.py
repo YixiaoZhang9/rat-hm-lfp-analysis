@@ -7,6 +7,7 @@ import pandas as pd
 from scipy.io import loadmat
 
 from modules.find_ripples_lfp import find_ripples_karlsson_Adaptive
+from modules.project_config import get_path
 
 
 def find_bouts(scoring_data, target_value=3, fs=1000):
@@ -42,7 +43,7 @@ def find_bouts(scoring_data, target_value=3, fs=1000):
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/GL14_RAT_FA/"
+dir_base1 = get_path("RAT_HM_GL14_ROOT")
 dir_R5_8_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R5-8/PreprocessedData"
 )

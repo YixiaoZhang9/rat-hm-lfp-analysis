@@ -1,3 +1,5 @@
+from modules.project_config import get_path
+
 """
 This script assesses the reliability of spindle detection using two validation criteria:
 
@@ -24,7 +26,7 @@ from signal_viewer import SpindleViewer
 from modules.threshold_ripple_detection import filter_lfp
 
 # Paths
-dir_base1 = "/media/yixiao/Data4/"
+dir_base1 = get_path("RAT_HM_DATA4_ROOT")
 
 dir_data_root = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/"

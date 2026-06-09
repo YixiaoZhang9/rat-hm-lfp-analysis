@@ -8,6 +8,7 @@ from scipy.io import loadmat
 from scipy.signal import butter, filtfilt
 
 from modules.find_spindles_lfp_Antoine_lab import spindle_detection_wavelet
+from modules.project_config import get_path
 
 
 def filter_lfp(lfp, fs, freq_range):
@@ -65,7 +66,7 @@ def find_non_nrem_bouts(scoring_data, nrem_value=3, fs=1000):
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/GL14_RAT_FA/"
+dir_base1 = get_path("RAT_HM_GL14_ROOT")
 dir_R1_4_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/PreprocessedData"
 )

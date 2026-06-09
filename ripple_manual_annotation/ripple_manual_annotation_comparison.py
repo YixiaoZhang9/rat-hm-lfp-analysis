@@ -7,6 +7,8 @@ from IPython.display import display
 from scipy.io import loadmat
 from sklearn.metrics import cohen_kappa_score
 
+from modules.project_config import get_path
+
 
 def filter_nrem(starts, ends):
     keep = []
@@ -29,7 +31,7 @@ def filter_nrem(starts, ends):
 
 
 # set the root path
-root = "/mnt/genzel/Rat/HM/Rat_HM_Ephys_TD/Rat_HM_Ripple_Detection/Ripple_Marking"
+root = get_path("RAT_HM_RIPPLE_MARKING_ROOT")
 
 annotators = ["Anumita", "Kjell", "Lisa", "Sachuriga", "Yixiao"]
 main_annotator = "Yixiao"

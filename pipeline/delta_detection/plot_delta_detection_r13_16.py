@@ -10,12 +10,13 @@ from PyQt5.QtWidgets import QApplication, QFileDialog
 from scipy.io import loadmat
 from signal_viewer import DeltaViewer
 
+from modules.project_config import get_path
 from modules.threshold_ripple_detection import (
     filter_lfp,
 )
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/Data4/"
+dir_base1 = get_path("RAT_HM_DATA4_ROOT")
 dir_R13_16_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData"
 )

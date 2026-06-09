@@ -10,6 +10,7 @@ from scipy.io import loadmat
 from scipy.signal import hilbert
 
 from modules.ephys_signal_scoring_view import SignalPlotViewer
+from modules.project_config import get_path
 from modules.threshold_ripple_detection import (
     filter_lfp,
     find_bouts,
@@ -27,7 +28,7 @@ from modules.threshold_ripple_detection import (
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base1 = "/media/yixiao/Data4/"
+dir_base1 = get_path("RAT_HM_DATA4_ROOT")
 dir_R9_12_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R9-12/PreprocessedData"
 )

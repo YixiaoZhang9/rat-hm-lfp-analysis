@@ -6,6 +6,7 @@ from scipy.io import loadmat
 
 from modules import Function_reduce_powerline_harmonics as powerline
 from modules import ephys_preprocessing as processing
+from modules.project_config import get_path
 
 """
 This script performs the following preprocessing steps on the dataset:
@@ -23,7 +24,7 @@ This script performs the following preprocessing steps on the dataset:
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base = "/media/yixiao/GL14_RAT_FA/"
+dir_base = get_path("RAT_HM_GL14_ROOT")
 dir_R1_4_RawData = os.path.join(
     dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_New/R1-4/RawData"
 )

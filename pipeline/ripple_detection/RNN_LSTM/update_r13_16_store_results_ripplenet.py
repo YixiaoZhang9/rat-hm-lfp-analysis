@@ -9,6 +9,8 @@ from scipy.io import loadmat
 from scipy.stats import zscore
 from tensorflow import keras
 
+from modules.project_config import get_path
+
 # Custom modules
 from modules.threshold_ripple_detection import find_bouts
 
@@ -206,7 +208,7 @@ def get_binary_predictions(y_prob, threshold, min_distance, min_width):
     return y_binary, np.asarray(detected_peaks)
 
 
-dir_base1 = "/media/yixiao/Data4/"
+dir_base1 = get_path("RAT_HM_DATA4_ROOT")
 dir_R13_16_Data = os.path.join(
     dir_base1, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/PreprocessedData"
 )

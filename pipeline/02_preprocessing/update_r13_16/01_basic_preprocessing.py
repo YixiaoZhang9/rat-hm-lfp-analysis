@@ -5,6 +5,7 @@ import numpy as np
 from scipy.io import loadmat, savemat
 
 from modules import ephys_preprocessing as processing
+from modules.project_config import get_path
 
 """
 This script performs the following preprocessing steps on the dataset:
@@ -20,7 +21,7 @@ This script performs the following preprocessing steps on the dataset:
 
 
 # ---- Set base paths, date lists, and constants for data processing ----
-dir_base = "/media/yixiao/Data4/"
+dir_base = get_path("RAT_HM_DATA4_ROOT")
 dir_R13_16_RawData = os.path.join(
     dir_base, "Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis/R13-16/RawData"
 )
