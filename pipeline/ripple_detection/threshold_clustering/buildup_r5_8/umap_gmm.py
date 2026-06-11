@@ -13,7 +13,7 @@ from modules.threshold_ripple_detection import filter_lfp
 
 # ======================= Load Data ==========================
 total_df = pd.read_csv(
-    "../../../../results/All_Rat5-8_Ripple_Features_17features_test.csv"
+    "../../../../archive/Ripple_feature_results/All_Rat5-8_Ripple_Features_17features_test.csv"
 )
 
 features = [

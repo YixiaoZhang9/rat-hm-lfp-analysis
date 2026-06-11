@@ -29,7 +29,7 @@ dir_R1_4_Data = os.path.join(
 # 2. Load Ripple Feature Data
 # ===============================================================
 total_df = pd.read_csv(
-    "../../../../results/All_Rat1-4_Ripple_Features_17features_test.csv"
+    "../../../../archive/Ripple_feature_results/All_Rat1-4_Ripple_Features_17features_test.csv"
 )
 
 # Select features for clustering

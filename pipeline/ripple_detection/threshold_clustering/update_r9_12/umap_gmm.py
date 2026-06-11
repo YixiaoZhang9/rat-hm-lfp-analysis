@@ -12,7 +12,7 @@ from modules.project_config import get_path
 from modules.threshold_ripple_detection import filter_lfp
 
 # ======================= Load Data ==========================
-total_df = pd.read_csv("../../../../results/All_Rat9-12_Ripple_Features_17features.csv")
+total_df = pd.read_csv("../../../../archive/Ripple_feature_results/All_Rat9-12_Ripple_Features_17features.csv")
 
 # Select features for clustering
 features = [
