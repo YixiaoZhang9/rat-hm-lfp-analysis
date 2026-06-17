@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import butter, filtfilt
+from scipy.integrate import trapezoid
 
 from modules.lfp_artifact_MAD_detection import mad_artifact_detector
 
@@ -76,7 +77,7 @@ def find_deltas_lfp(
 
     Returns
     -------
-    delta_features : ndarray, shape (n_events, 9)
+    delta_features : ndarray, shape (n_events, 10)
         Detected delta events and waveform features.
 
         Columns are:
@@ -89,6 +90,7 @@ def find_deltas_lfp(
         6. peak_to_peak_amplitude
         7. rising_slope
         8. decreasing_slope
+        9. area under curve
 
     Copyright (C) 2012-2017 Michaël Zugaro, 2012-2015 Nicolas Maingret,
 
@@ -146,7 +148,7 @@ def find_deltas_lfp(
 
     n_events = min(len(up_crossing), len(down_crossing))
     if n_events < 2:
-        return np.empty((0, 9))
+        return np.empty((0, 10))
 
     triplets = np.column_stack(
         [
@@ -181,7 +183,7 @@ def find_deltas_lfp(
         keep_triplet.append([a, b, c])
 
     if len(keep_triplet) == 0:
-        return np.empty((0, 9))
+        return np.empty((0, 10))
 
     triplets = np.array(keep_triplet)
 
@@ -216,10 +218,10 @@ def find_deltas_lfp(
     delta = delta[case1 | case2]
 
     if len(delta) == 0:
-        return np.empty((0, 9))
+        return np.empty((0, 10))
 
     # calculate the parameters
-    delta_features = np.zeros((len(delta), 9))
+    delta_features = np.zeros((len(delta), 10))
 
     for i, row in enumerate(delta):
         a = int(row[0])
@@ -246,6 +248,9 @@ def find_deltas_lfp(
         # Decreasing slope: positive peak to negative trough2
         decreasing_slope = abs((trough2_amplitude - pos_amplitude) / ((c - b) / fs))
 
+        # area under curve
+        auc = trapezoid(np.abs(event_signal), dx=1 / fs)
+
         delta_features[i, 0] = a
         delta_features[i, 1] = b
         delta_features[i, 2] = c
@@ -255,6 +260,8 @@ def find_deltas_lfp(
         delta_features[i, 6] = peak_to_peak_amplitude
         delta_features[i, 7] = rising_slope
         delta_features[i, 8] = decreasing_slope
+        delta_features[i, 9] = auc
+
 
     # plot
     if f_plot:

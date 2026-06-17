@@ -175,6 +175,7 @@ for rat in rats:
                     delta_peak_to_peak_amplitude_list = []
                     delta_rising_slope_list = []
                     delta_decreasing_slope_list = []
+                    delta_area_under_curve_list = []
                     nrem_duration_list = []
 
                     # process each NREM bout
@@ -213,6 +214,7 @@ for rat in rats:
                         peak_to_peak_amplitude = deltas[:, 6]
                         rising_slope = deltas[:, 7]
                         decreasing_slope = deltas[:, 8]
+                        delta_area_under_curve = deltas[:, 9]
 
                         for i, delta in enumerate(delta_list):
                             start = delta[0]
@@ -231,11 +233,11 @@ for rat in rats:
                             )
                             delta_rising_slope_list.append(rising_slope[i])
                             delta_decreasing_slope_list.append(decreasing_slope[i])
+                            delta_area_under_curve_list.append(delta_area_under_curve[i])
 
                             nrem_duration_list.append(bout_duration_sec)
 
                     # SAVE CSV
-
                     if len(delta_start_list) > 0:
                         df = pd.DataFrame(
                             {
@@ -248,6 +250,7 @@ for rat in rats:
                                 "delta_peak_to_peak_amplitude": delta_peak_to_peak_amplitude_list,
                                 "delta_rising_slope": delta_rising_slope_list,
                                 "delta_decreasing_slope": delta_decreasing_slope_list,
+                                "delta_area_under_curve" :delta_area_under_curve_list,
                                 "nrem_bout_duration_s": nrem_duration_list,
                             }
                         )
@@ -264,6 +267,7 @@ for rat in rats:
                                 "delta_peak_to_peak_amplitude",
                                 "delta_rising_slope",
                                 "delta_decreasing_slope",
+                                "delta_area_under_curve",
                                 "nrem_bout_duration_s",
                             ]
                         )
