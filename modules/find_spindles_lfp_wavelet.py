@@ -295,6 +295,15 @@ def find_spindles_lfp_wavelet(
 
         spindles.append([start_idx, peak_idx, end_idx])
 
+    spindles = np.asarray(spindles, dtype=int)
+
+    if len(spindles) == 0:
+        return np.empty((0, 7))
+
+    # remove duplicate detections
+    _, idx = np.unique(spindles, axis=0, return_index=True)
+    spindles = spindles[np.sort(idx)]
+
     spindle_features = []
 
     for start_idx, peak_idx, end_idx in spindles:

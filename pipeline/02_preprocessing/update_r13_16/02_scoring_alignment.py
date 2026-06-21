@@ -49,8 +49,8 @@ dates = [
 expected_lengths = [30 * 60 * fs]
 
 # ------------------------------------------------------------------------
-for rat in [rats[3]]:  # for rat in [rats[0]]   rat in rats
-    for region in [regions[0]]:  # for region in [regions[0]]  region in regions
+for rat in rats:  # for rat in [rats[0]]   rat in rats
+    for region in regions:  # for region in [regions[0]]  region in regions
         dir_R13_16_RawData_perday = os.path.join(dir_R13_16_Data, region, str(rat))
         folders_SD = [
             name

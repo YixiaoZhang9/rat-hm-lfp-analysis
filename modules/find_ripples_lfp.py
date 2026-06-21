@@ -31,6 +31,21 @@ def smooth_signal(signal, fs, sigma):
     smoothed_lfp = convolve(signal, gauss_filter, "same")
     return smoothed_lfp
 
+def deduplicate_ripples(starts, peaks, ends):
+    starts = np.asarray(starts, dtype=int)
+    peaks = np.asarray(peaks, dtype=int)
+    ends = np.asarray(ends, dtype=int)
+
+    if len(starts) == 0:
+        return starts, peaks, ends
+
+    events = np.column_stack([starts, peaks, ends])
+
+    _, unique_idx = np.unique(events, axis=0, return_index=True)
+    unique_idx = np.sort(unique_idx)
+
+    events = events[unique_idx]
+    return events[:, 0], events[:, 1], events[:, 2]
 
 def intervals_to_mask(intervals, timestamps):
     mask = np.zeros_like(timestamps, dtype=bool)
@@ -289,7 +304,10 @@ def find_ripples_karlsson_Adaptive(
     peak_frequency_ripple = []
     mean_frequency_ripple = []
 
-    for start, end, peak in zip(start_idx_ripple, end_idx_ripple, peak_idx_ripple):
+    # remove duplicate detection results
+    start_idx_ripple, peak_idx_ripple, end_idx_ripple = deduplicate_ripples(start_idx_ripple, peak_idx_ripple, end_idx_ripple)
+
+    for start, peak, end in zip(start_idx_ripple, peak_idx_ripple, end_idx_ripple):
         # Duration / s
         duration = (end - start) / fs
         duration_ripple.append(duration)

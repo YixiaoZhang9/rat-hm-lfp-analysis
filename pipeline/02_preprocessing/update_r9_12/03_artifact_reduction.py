@@ -49,7 +49,7 @@ plot_data = 0  # plot the signal
 
 # -------------------------------Preprocesing-----------------------------------------
 for rat in rats:  # for rat in [rats[0]]   for rat in rats
-    for region in [regions[0]]:  # for region in [regions[0]] for region in regions
+    for region in regions:  # for region in [regions[0]] for region in regions
         dir_R9_12_filteredData_perday = os.path.join(
             dir_R9_12_filteredData, region, str(rat)
         )

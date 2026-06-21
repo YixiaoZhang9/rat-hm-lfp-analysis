@@ -349,6 +349,12 @@ def spindle_detection_wavelet(raw_signal, signal, fs_raw, thrL=1, thrH=3):
 
     if len(spindles) > 0:
         spindles = (spindles * scale).astype(int)
+        # remove duplicate detections after rescaling
+        _, idx = np.unique(spindles, axis=0, return_index=True)
+        idx = np.sort(idx)
+        spindles = spindles[idx]
+    else:
+        return np.empty((0, 7))
 
     spindle_features = []
 

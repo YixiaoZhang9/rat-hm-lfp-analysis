@@ -314,13 +314,22 @@ def find_spindles_lfp_envelope(
     end_idx_spindle = np.array(clean_stop)
     peak_idx_spindle = np.array(clean_peak)
 
+    if len(start_idx_spindle) > 0:
+        events = np.column_stack((start_idx_spindle, peak_idx_spindle, end_idx_spindle))
+        _, idx = np.unique(events, axis=0, return_index=True)
+        idx = np.sort(idx)
+
+        start_idx_spindle = start_idx_spindle[idx]
+        peak_idx_spindle = peak_idx_spindle[idx]
+        end_idx_spindle = end_idx_spindle[idx]
+
     # calculate the features of spindles
     duration_spindle = []
     amplitude_spindle = []
     peak_frequency_spindle = []
     mean_frequency_spindle = []
 
-    for start, end, peak in zip(start_idx_spindle, end_idx_spindle, peak_idx_spindle):
+    for start, peak, end in zip(start_idx_spindle, peak_idx_spindle, end_idx_spindle):
         # Duration / s
         duration = (end - start) / fs
         duration_spindle.append(duration)
