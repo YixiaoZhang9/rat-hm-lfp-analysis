@@ -79,17 +79,50 @@ for rat in rats:  # for rat in [rats[0]]   rat in rats
                                     trial_scoring_data = loadmat(
                                         os.path.join(path_scoring, f)
                                     )
-                                    scoring_data = trial_scoring_data[
-                                        "states"
-                                    ].squeeze()
-
-                            # cut data and scoring results and save the file
-                            if len(data) > len(scoring_data) * fs:
-                                data_new = data[: len(scoring_data) * fs]
-                                savemat(file, {"data": data_new})
-                            else:
-                                scoring_data_new = data[: math.floor(len(data) / fs)]
-                                savemat(
-                                    os.path.join(path_scoring, f),
-                                    {"states": scoring_data_new},
+                                    scoring_data = trial_scoring_data["states"].squeeze()
+                                    f_scoring = f
+                                    break
+                            if len(data) not in expected_lengths:
+                                print(
+                                    f"Data length in {file} doesn't match any expected duration"
                                 )
+
+                                # cut data and scoring results and save the file
+                                if len(data) > len(scoring_data) * fs:
+                                    print(
+                                        f"Data length in {file} is longer than scoring length, pad with 0"
+                                    )
+                                    pad_len = math.floor(len(data) / fs) - len(scoring_data)
+                                    scoring_data_new = np.concatenate(
+                                        [scoring_data, np.full(pad_len, 0)]
+                                    )
+                                    data_new = data[: len(scoring_data_new) * fs]
+                                    savemat(file, {"data": data_new})
+                                    savemat(
+                                        os.path.join(path_scoring, f_scoring),
+                                        {"states": scoring_data_new},
+                                    )
+                                elif len(data) < len(scoring_data) * fs:
+                                    scoring_data_new = scoring_data[
+                                                       : math.floor(len(data) / fs)
+                                                       ]
+                                    data_new = data[: len(scoring_data_new) * fs]
+                                    savemat(file, {"data": data_new})
+                                    savemat(
+                                        os.path.join(path_scoring, f_scoring),
+                                        {"states": scoring_data_new},
+                                    )
+
+                            else:  # only check the length of scoring files
+                                if len(scoring_data) * fs < len(data):
+                                    print(
+                                        f"Sleep scoring {file} is shorter than expected, pad with 0"
+                                    )
+                                    pad_len = int((len(data) / fs) - len(scoring_data))
+                                    scoring_data_new = np.concatenate(
+                                        [scoring_data, np.full(pad_len, 0)]
+                                    )
+                                    savemat(
+                                        os.path.join(path_scoring, f_scoring),
+                                        {"states": scoring_data_new},
+                                    )
