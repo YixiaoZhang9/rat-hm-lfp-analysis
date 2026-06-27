@@ -161,7 +161,7 @@ for rat in rats:
             for ripple_file in os.listdir(sleep_path):
                 ripple_file_path = os.path.join(sleep_path, ripple_file)
 
-                if f"_{trial_id}_hippocampal_ripples." in ripple_file:
+                if f"_{trial_id}_hippocampal_ripples_threshold." in ripple_file:
                     file_sleep_period = sleep_period
                     print("threshold1:", ripple_file_path)
                     threshold_df = pd.read_csv(ripple_file_path)
@@ -173,7 +173,7 @@ for rat in rats:
                     print("threshold2:", ripple_file_path)
                     threshold_df2 = pd.read_csv(ripple_file_path)
                     threshold2_ripples = threshold_df2[
-                        ["ripple_start", "ripple_end"]
+                        ["ripple_start_index", "ripple_end_index"]
                     ].to_numpy()
 
         # Find scoring file

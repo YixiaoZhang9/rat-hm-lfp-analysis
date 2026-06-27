@@ -18,6 +18,7 @@ __pycache__/
 config.yaml
 archive/
 training_data/
+pipeline/011_load_and_store_accelerometer_signal/
 trained_networks/
 *.npz
 *.mat

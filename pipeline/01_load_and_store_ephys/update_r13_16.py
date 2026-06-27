@@ -149,6 +149,9 @@ for rat in rats:
                 if rat == 15 and date == "20230829" and trial == "_9":
                     continue
 
+                elif rat == 15 and date == "20230905" and trial == "_13":
+                    continue
+
                 fstore.save_sleep_recording(
                     path_recording,
                     trial,
