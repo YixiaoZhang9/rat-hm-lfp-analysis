@@ -1,6 +1,7 @@
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -36,6 +37,15 @@ class SignalPlotViewer(QWidget):
 
         # Amplitude scaling factor
         self.amplitude_scale = 1.0
+        self.channel_centers = {}
+        self.channel_ranges = {}
+        for ch, values in self.data_dict.items():
+            data = np.asarray(values)
+            if "scoring" in ch.lower():
+                continue
+            self.channel_centers[ch] = np.nanmedian(data)
+            data_range = np.nanmax(data) - np.nanmin(data)
+            self.channel_ranges[ch] = data_range if data_range > 0 else 1
 
         self.init_ui()
 
@@ -64,6 +74,11 @@ class SignalPlotViewer(QWidget):
         axis.enableAutoSIPrefix(False)
         axis.setStyle(tickTextOffset=10, autoReduceTextSpace=False)
         axis.setTickSpacing(major=1, minor=0.5)
+        axis.setTickFont(QFont("Arial", 14))
+
+        left_axis = self.plot.getAxis("left")
+        left_axis.setTickFont(QFont("Arial", 14))
+        left_axis.setStyle(tickTextOffset=10, autoReduceTextSpace=False)
 
         # ------------------- Curves -------------------
         self.curves = []
@@ -84,7 +99,9 @@ class SignalPlotViewer(QWidget):
         ]
 
         for i in range(self.num_channels):
-            pen = pg.mkPen(self.colors[i % len(self.colors)], width=1.5)
+            channel_name = self.channel_names[i]
+            line_width = 3 if "scoring" in channel_name.lower() else 1.5
+            pen = pg.mkPen(self.colors[i % len(self.colors)], width=line_width)
             curve = self.plot.plot(pen=pen, downsample=10, clipToView=True)
             self.curves.append(curve)
 
@@ -92,7 +109,7 @@ class SignalPlotViewer(QWidget):
         ticks = [
             (offset, name) for offset, name in zip(self.offsets, self.channel_names)
         ]
-        self.plot.getAxis("left").setTicks([ticks])
+        left_axis.setTicks([ticks])
 
         main_layout.addWidget(self.plot)
 
@@ -203,7 +220,7 @@ class SignalPlotViewer(QWidget):
         for i, ch in enumerate(self.channel_names):
             data = self.data_dict[ch][self.start_idx : end_idx]
 
-            if ch.lower() == "scoring":
+            if "scoring" in ch.lower():
                 scaled = data + self.offsets[i]
 
                 x_step = np.empty(len(t_window) + 1)
@@ -217,14 +234,14 @@ class SignalPlotViewer(QWidget):
                     text = pg.TextItem(
                         str(int(data[idx])), color="r", anchor=(0.5, 1.0)
                     )
+                    text.setFont(QFont("Arial", 18, QFont.Bold))
                     text.setPos(t_window[idx], scaled[idx])
                     self.plot.addItem(text)
                     self.scoring_text_items.append(text)
 
             else:
-                ptp = np.ptp(data) or 1
                 scaled = (
-                    data / ptp
+                    (data - self.channel_centers[ch]) / self.channel_ranges[ch]
                 ) * self.offset_step * 0.8 * self.amplitude_scale + self.offsets[i]
                 self.curves[i].setData(t_window, scaled)
 

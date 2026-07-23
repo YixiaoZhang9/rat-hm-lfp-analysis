@@ -6,7 +6,9 @@ import re
 import matplotlib
 import numpy as np
 from scipy.interpolate import CubicSpline, interp1d
-from scipy.signal import butter, filtfilt, freqz, hilbert, resample
+from scipy.signal import butter, filtfilt, freqz, hilbert, resample,resample_poly
+from fractions import Fraction
+
 
 matplotlib.use("Qt5Agg")
 import glob
@@ -90,6 +92,14 @@ def downsampling(data, fs, ds_fs, plot_response=False):
     else:
         filtered = np.vstack([filtfilt(b, a, ch) for ch in data])
 
+    # ratio = Fraction(ds_fs / fs).limit_denominator()
+    #
+    # if data.ndim == 1:
+    #     downsampled = resample_poly(
+    #         filtered,
+    #         up=ratio.numerator,
+    #         down=ratio.denominator
+    #     ).astype("float32", copy=False)
     # Calculate number of samples after resampling
     num_samples = int(filtered.shape[-1] * ds_fs / fs)
 

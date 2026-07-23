@@ -203,9 +203,12 @@ for rat in rats:
                             spindle_peak_frequency_list = []
                             spindle_mean_frequency_list = []
                             nrem_duration_list = []
+                            nrem_bout_index_list = []
+                            nrem_bout_start_list = []
+                            nrem_bout_end_list = []
 
                             # process each NREM bout
-                            for start_sample, end_sample in NREM_bouts:
+                            for nrem_bout_idx, (start_sample, end_sample) in enumerate(NREM_bouts, start=1):
                                 bout_duration_sec = (end_sample - start_sample) / fs
 
                                 bout_data = filtered_data[start_sample:end_sample]
@@ -253,6 +256,9 @@ for rat in rats:
                                     spindle_mean_frequency_list.append(mean_freq[i])
 
                                     nrem_duration_list.append(bout_duration_sec)
+                                    nrem_bout_index_list.append(nrem_bout_idx)
+                                    nrem_bout_start_list.append(start_sample)
+                                    nrem_bout_end_list.append(end_sample)
 
                             # SAVE CSV
 
@@ -266,7 +272,10 @@ for rat in rats:
                                         "spindle_amplitude": spindle_amplitude_list,
                                         "spindle_peak_frequency_hz": spindle_peak_frequency_list,
                                         "spindle_mean_frequency_hz": spindle_mean_frequency_list,
+                                        "nrem_bout_index": nrem_bout_index_list,
                                         "nrem_bout_duration_s": nrem_duration_list,
+                                        "nrem_bout_start_index": nrem_bout_start_list,
+                                        "nrem_bout_end_index": nrem_bout_end_list,
                                     }
                                 )
 
@@ -280,7 +289,10 @@ for rat in rats:
                                         "spindle_amplitude",
                                         "spindle_peak_frequency_hz",
                                         "spindle_mean_frequency_hz",
+                                        "nrem_bout_index",
                                         "nrem_bout_duration_s",
+                                        "nrem_bout_start_index",
+                                        "nrem_bout_end_index",
                                     ]
                                 )
 

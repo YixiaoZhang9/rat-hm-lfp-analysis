@@ -175,11 +175,11 @@ class RippleViewer(QWidget):
         self.ax_filtered.clear()
 
         # --- Plot signals ---
-        self.ax_raw.plot(t, self.lfp[start:end], color="#5B5F97", linewidth=1.2)
+        self.ax_raw.plot(t, self.lfp[start:end], color="#5B5F97", linewidth=1)
         self.ax_raw.set_ylabel("Signal", fontsize=13)
 
         self.ax_filtered.plot(
-            t, self.filtered[start:end], color="#C06C84", linewidth=1.2
+            t, self.filtered[start:end], color="#C06C84", linewidth=1
         )
         self.ax_filtered.set_ylabel("Band-pass", fontsize=13)
 
@@ -249,7 +249,7 @@ class RippleViewer(QWidget):
                 continue
 
             self.ax_raw.hlines(
-                y=y, xmin=s / self.fs, xmax=e / self.fs, colors=color, linewidth=5
+                y=y, xmin=s / self.fs, xmax=e / self.fs, colors=color, linewidth=2
             )
 
     def plot_ripples(self, start, end):

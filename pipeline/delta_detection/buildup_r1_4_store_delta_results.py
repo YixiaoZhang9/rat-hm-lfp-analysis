@@ -177,9 +177,12 @@ for rat in rats:
                     delta_decreasing_slope_list = []
                     delta_area_under_curve_list = []
                     nrem_duration_list = []
+                    nrem_bout_index_list = []
+                    nrem_bout_start_list = []
+                    nrem_bout_end_list = []
 
                     # process each NREM bout
-                    for start_sample, end_sample in NREM_bouts:
+                    for nrem_bout_idx, (start_sample, end_sample) in enumerate(NREM_bouts, start=1):
                         bout_duration_sec = (end_sample - start_sample) / fs
 
                         bout_data = filtered_data[start_sample:end_sample]
@@ -236,6 +239,9 @@ for rat in rats:
                             delta_area_under_curve_list.append(delta_area_under_curve[i])
 
                             nrem_duration_list.append(bout_duration_sec)
+                            nrem_bout_index_list.append(nrem_bout_idx)
+                            nrem_bout_start_list.append(start_sample)
+                            nrem_bout_end_list.append(end_sample)
 
                     # SAVE CSV
                     if len(delta_start_list) > 0:
@@ -251,7 +257,10 @@ for rat in rats:
                                 "delta_rising_slope": delta_rising_slope_list,
                                 "delta_decreasing_slope": delta_decreasing_slope_list,
                                 "delta_area_under_curve" :delta_area_under_curve_list,
+                                "nrem_bout_index": nrem_bout_index_list,
                                 "nrem_bout_duration_s": nrem_duration_list,
+                                "nrem_bout_start_index": nrem_bout_start_list,
+                                "nrem_bout_end_index": nrem_bout_end_list,
                             }
                         )
 
@@ -268,7 +277,10 @@ for rat in rats:
                                 "delta_rising_slope",
                                 "delta_decreasing_slope",
                                 "delta_area_under_curve",
+                                "nrem_bout_index",
                                 "nrem_bout_duration_s",
+                                "nrem_bout_start_index",
+                                "nrem_bout_end_index",
                             ]
                         )
 

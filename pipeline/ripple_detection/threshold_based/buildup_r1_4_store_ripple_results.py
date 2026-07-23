@@ -161,11 +161,14 @@ for rat in rats:
                     ripple_peak_frequency_list = []
                     ripple_mean_frequency_list = []
                     nrem_duration_list = []
+                    nrem_bout_index_list = []
+                    nrem_bout_start_list = []
+                    nrem_bout_end_list = []
 
                     # find NREM bouts
                     NREM_bouts = find_bouts(scoring_data, target_value=3, fs=fs)
 
-                    for start_sample, end_sample in NREM_bouts:
+                    for nrem_bout_idx, (start_sample, end_sample) in enumerate(NREM_bouts, start=1):
                         bout_duration_sec = (end_sample - start_sample) / fs
                         bout_data = data[start_sample:end_sample]
 
@@ -214,6 +217,9 @@ for rat in rats:
                             ripple_mean_frequency_list.append(mean_freq[i])
 
                             nrem_duration_list.append(bout_duration_sec)
+                            nrem_bout_index_list.append(nrem_bout_idx)
+                            nrem_bout_start_list.append(start_sample)
+                            nrem_bout_end_list.append(end_sample)
 
                     # save CSV
                     if len(ripple_start_list) > 0:
@@ -226,7 +232,10 @@ for rat in rats:
                                 "ripple_amplitude": ripple_amplitude_list,
                                 "ripple_peak_frequency_hz": ripple_peak_frequency_list,
                                 "ripple_mean_frequency_hz": ripple_mean_frequency_list,
+                                "nrem_bout_index": nrem_bout_index_list,
                                 "nrem_bout_duration_s": nrem_duration_list,
+                                "nrem_bout_start_index": nrem_bout_start_list,
+                                "nrem_bout_end_index": nrem_bout_end_list,
                             }
                         )
                     else:
@@ -240,7 +249,10 @@ for rat in rats:
                                 "ripple_amplitude",
                                 "ripple_peak_frequency_hz",
                                 "ripple_mean_frequency_hz",
+                                "nrem_bout_index",
                                 "nrem_bout_duration_s",
+                                "nrem_bout_start_index",
+                                "nrem_bout_end_index",
                             ]
                         )
 

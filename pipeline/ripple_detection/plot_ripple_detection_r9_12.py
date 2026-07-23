@@ -294,7 +294,7 @@ for r in df_long["rat"].unique():
 ##--------------------------plot the signal-----------------------------
 def load_events(csv_path):
     df = pd.read_csv(csv_path)
-    return list(zip(df["ripple_start"].values, df["ripple_end"].values))
+    return list(zip(df["ripple_start_index"].values, df["ripple_end_index"].values))
 
 
 # ---- Open file dialog to select a trial .mat file ----
@@ -359,15 +359,15 @@ csv_ripplenet = os.path.join(
     dir_ripple, f"{trial_id}_hippocampal_ripples_ripplenet.csv"
 )
 
-threshold_events = load_events(csv_threshold) if os.path.exists(csv_threshold) else []
+# threshold_events = load_events(csv_threshold) if os.path.exists(csv_threshold) else []
 threshold2_events = (
     load_events(csv_threshold2) if os.path.exists(csv_threshold2) else []
 )
-threshold3_events = (
-    load_events(csv_threshold3) if os.path.exists(csv_threshold3) else []
-)
-cnn_events = load_events(csv_cnn) if os.path.exists(csv_cnn) else []
-ripplenet_events = load_events(csv_ripplenet) if os.path.exists(csv_ripplenet) else []
+# threshold3_events = (
+#     load_events(csv_threshold3) if os.path.exists(csv_threshold3) else []
+# )
+# cnn_events = load_events(csv_cnn) if os.path.exists(csv_cnn) else []
+# ripplenet_events = load_events(csv_ripplenet) if os.path.exists(csv_ripplenet) else []
 
 
 # ---- Launch viewer ----
@@ -378,9 +378,9 @@ if app is None:
     app = QApplication(sys.argv)
 
 event_sets = {
-    "Threshold": threshold_events,
+    # "Threshold": threshold_events,
     "Threshold2": threshold2_events,
-    "Threshold3": threshold3_events,
+    # "Threshold3": threshold3_events,
     # "CNN": cnn_events,
     # "RippleNet": ripplenet_events,
 }

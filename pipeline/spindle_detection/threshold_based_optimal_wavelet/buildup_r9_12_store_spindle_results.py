@@ -196,12 +196,18 @@ for rat in rats:
 
                             # storage
                             spindle_start_list = []
-                            spindle_end_list = []
                             spindle_peak_list = []
+                            spindle_end_list = []
                             spindle_duration_list = []
+                            spindle_amplitude_list = []
+                            spindle_peak_frequency_list = []
+                            spindle_mean_frequency_list = []
                             nrem_duration_list = []
+                            nrem_bout_index_list = []
+                            nrem_bout_start_list = []
+                            nrem_bout_end_list = []
 
-                            for start_sample, end_sample in NREM_bouts:
+                            for nrem_bout_idx, (start_sample, end_sample) in enumerate(NREM_bouts, start=1):
                                 bout_duration_sec = (end_sample - start_sample) / fs
                                 bout_data = filtered_data[start_sample:end_sample]
                                 bout_raw_data = data[start_sample:end_sample]
@@ -219,8 +225,13 @@ for rat in rats:
                                     )
                                 )
 
+                                duration = spindles[:, 3]
+                                amplitude = spindles[:, 4]
+                                peak_freq = spindles[:, 5]
+                                mean_freq = spindles[:, 6]
+
                                 # store each spindle
-                                for spindle in spindle_list:
+                                for i, spindle in enumerate(spindle_list):
                                     start = spindle[0]
                                     peak = spindle[1]
                                     end = spindle[2]
@@ -228,27 +239,50 @@ for rat in rats:
                                     spindle_start_list.append(start)
                                     spindle_peak_list.append(peak)
                                     spindle_end_list.append(end)
-                                    spindle_duration_list.append((end - start) / fs)
+
+                                    spindle_duration_list.append(duration[i])
+                                    spindle_amplitude_list.append(amplitude[i])
+
+                                    spindle_peak_frequency_list.append(peak_freq[i])
+                                    spindle_mean_frequency_list.append(mean_freq[i])
+
                                     nrem_duration_list.append(bout_duration_sec)
+                                    nrem_bout_index_list.append(nrem_bout_idx)
+                                    nrem_bout_start_list.append(start_sample)
+                                    nrem_bout_end_list.append(end_sample)
 
                             # save CSV
                             if len(spindle_start_list) > 0:
                                 df = pd.DataFrame(
                                     {
-                                        "spindle_start": spindle_start_list,
-                                        "spindle_peak": spindle_peak_list,
-                                        "spindle_end": spindle_end_list,
-                                        "spindle_duration_sec": spindle_duration_list,
-                                        "nrem_bout_duration_sec": nrem_duration_list,
+                                        "spindle_start_index": spindle_start_list,
+                                        "spindle_peak_index": spindle_peak_list,
+                                        "spindle_end_index": spindle_end_list,
+                                        "spindle_duration_s": spindle_duration_list,
+                                        "spindle_amplitude": spindle_amplitude_list,
+                                        "spindle_peak_frequency_hz": spindle_peak_frequency_list,
+                                        "spindle_mean_frequency_hz": spindle_mean_frequency_list,
+                                        "nrem_bout_index": nrem_bout_index_list,
+                                        "nrem_bout_duration_s": nrem_duration_list,
+                                        "nrem_bout_start_index": nrem_bout_start_list,
+                                        "nrem_bout_end_index": nrem_bout_end_list,
                                     }
                                 )
+
                             else:
                                 df = pd.DataFrame(
                                     columns=[
-                                        "spindle_start",
-                                        "spindle_end",
-                                        "spindle_duration_sec",
-                                        "nrem_bout_duration_sec",
+                                        "spindle_start_index",
+                                        "spindle_peak_index",
+                                        "spindle_end_index",
+                                        "spindle_duration_s",
+                                        "spindle_amplitude",
+                                        "spindle_peak_frequency_hz",
+                                        "spindle_mean_frequency_hz",
+                                        "nrem_bout_index",
+                                        "nrem_bout_duration_s",
+                                        "nrem_bout_start_index",
+                                        "nrem_bout_end_index",
                                     ]
                                 )
 

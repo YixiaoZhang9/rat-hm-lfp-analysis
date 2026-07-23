@@ -188,7 +188,7 @@ if app is None:
 
 def load_events(csv_path):
     df = pd.read_csv(csv_path)
-    return list(zip(df["delta_start"].values, df["delta_end"].values))
+    return list(zip(df["delta_start_index"].values, df["delta_end_index"].values))
 
 
 # ---- Open file dialog to select a trial .mat file ----

@@ -202,7 +202,7 @@ if app is None:
 ##--------------------------plot the signal-----------------------------
 def load_events(csv_path):
     df = pd.read_csv(csv_path)
-    return list(zip(df["spindle_start"].values, df["spindle_end"].values))
+    return list(zip(df["spindle_start_index"].values, df["spindle_end_index"].values))
 
 
 # ---- Open file dialog to select a trial .mat file ----
@@ -254,7 +254,7 @@ else:
 # ---- Find ripple CSVs ----
 dir_spindle = os.path.join(dir_R5_8_Spindle, region, rat, studyday, sleep_period)
 csv_threshold = os.path.join(
-    dir_spindle, "envelop_thr_1_peak_3.0", f"{trial_id}_spindles.csv"
+    dir_spindle, "envelop_thr_1_peak_3", f"{trial_id}_spindles.csv"
 )
 csv_wavelet = os.path.join(
     dir_spindle, "wavelet_amp_1_ampcore_3", f"{trial_id}_spindles_wavelet.csv"
