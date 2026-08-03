@@ -42,8 +42,11 @@ def run_test():
         dir_base, "R1-4/PreprocessedData/HPC/1/20221006/postsleep/chan102_9.mat"
     )
     scoring_path = os.path.join(
-        dir_base, "R1-4/Scoring/1/20221006/postsleep/States_102_9.mat"
+        dir_base,
+        "R1-4/Scoring/1/20221006/postsleep/"
+        "Rat_HM_Ephys_TD_Rat1_20221006_postsleep_09_SW-eegstates.mat",
     )
+
 
     if not os.path.exists(data_path):
         logging.error(f"Data file not found: {data_path}")
