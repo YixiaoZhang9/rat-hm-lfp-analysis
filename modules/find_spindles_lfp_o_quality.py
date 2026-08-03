@@ -1,11 +1,12 @@
-import numpy as np
-from spectrum import arburg
-from joblib import Parallel, delayed
-from tqdm import tqdm
 import contextlib
-import joblib
 import logging
 import time
+
+import joblib
+import numpy as np
+from joblib import Parallel, delayed
+from spectrum import arburg
+from tqdm import tqdm
 
 from modules.ephys_preprocessing import bandpass_filter, downsampling
 
@@ -177,13 +178,13 @@ def find_spindles_lfp(
         ])
 
     logging.info(f"Event scan complete in {time.time() - t0:.2f}s. Found {len(events)} events.")
-    
+
     # Calculate stats for all valid r-values across the entire recording
     valid_r = r_timeseries[~np.isnan(f_timeseries)]
     if valid_r.size > 0:
         logging.info(f"--- Global R Statistics (in spindle band) ---")
         logging.info(f"Min: {valid_r.min():.3f} | Max: {valid_r.max():.3f} | Avg: {valid_r.mean():.3f} | Std: {valid_r.std():.3f}")
-    
+
     logging.info(f"Total detection time: {time.time() - t_start:.2f}s.")
 
     return np.asarray(events)
