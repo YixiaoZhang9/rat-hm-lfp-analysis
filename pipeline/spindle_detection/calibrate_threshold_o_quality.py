@@ -74,19 +74,19 @@ def run_test():
     logging.info(f"Real signal: max_r={real_max_r:.3f} ({t_real:.1f}s)")
 
     t0 = time.time()
-    surrs = iaaft_surrogates(pooled_128, ns=1, verbose=True)
+    surrs = iaaft_surrogates(pooled_128, ns=19, verbose=True)
     t_iaaft = time.time() - t0
-    surrogate = surrs[0]
-    logging.info(f"IAAFT surrogate generation (1x): {t_iaaft:.2f}s")
+    for i, surrogate in enumerate(surrs):
+        logging.info(f"IAAFT surrogate generation ({i+1}x): {t_iaaft:.2f}s")
 
-    t0 = time.time()
-    r_surr, f_surr = fit_ar_on_prepared_signal(surrogate, TARGET_FS, n_jobs=-1, verbose=False)
-    t_ar = time.time() - t0
-    surr_max_r = np.nanmax(r_surr) if len(r_surr) else np.nan
-    logging.info(f"Surrogate 1: max_r={surr_max_r:.3f} (IAAFT {t_iaaft:.2f}s + AR fit {t_ar:.2f}s)")
+        t0 = time.time()
+        r_surr, f_surr = fit_ar_on_prepared_signal(surrogate, TARGET_FS, n_jobs=-1, verbose=False)
+        t_ar = time.time() - t0
+        surr_max_r = np.nanmax(r_surr) if len(r_surr) else np.nan
+        logging.info(f"Surrogate {i+1}: max_r={surr_max_r:.3f} (IAAFT {t_iaaft:.2f}s + AR fit {t_ar:.2f}s)")
 
-    est_total = (t_iaaft + t_ar) * N_SURROGATES
-    logging.info(f"Estimated total time for {N_SURROGATES} surrogates: {est_total/60:.2f} min")
+        est_total = (t_iaaft + t_ar) * (i + 1)
+        logging.info(f"Estimated total time for {i + 1} surrogates: {est_total/60:.2f} min")
 
 
 if __name__ == "__main__":
