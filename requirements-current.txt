@@ -27,6 +27,7 @@ numpy==2.4.6
 packaging==26.2
 pandas==3.0.5
 parso==0.8.7
+patsy==1.0.2
 pexpect==4.9.0
 pillow==12.3.0
 platformdirs==4.11.0
@@ -47,8 +48,9 @@ pyzmq==27.1.0
 scipy==1.18.0
 seaborn==0.13.2
 six==1.17.0
-spectrum==0.10.0
+
 stack-data==0.6.3
+statsmodels==0.14.6
 tornado==6.5.7
 tqdm==4.70.0
 traitlets==5.16.0
