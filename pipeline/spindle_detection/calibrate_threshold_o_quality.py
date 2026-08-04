@@ -56,7 +56,7 @@ def run_test():
     )
 
     raw_signal = loadmat(data_path)["data"].squeeze()
-    nrem_intervals = get_nrem_intervals(scoring_path, FS)
+    nrem_intervals = get_nrem_intervals(scoring_path)
     logging.info(f"Found {len(nrem_intervals)} NREM segments.")
 
     pooled_real_raw = pool_nrem_raw(raw_signal, nrem_intervals, FS, SEGMENT_SEC)
