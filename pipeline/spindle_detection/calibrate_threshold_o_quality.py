@@ -21,7 +21,7 @@ N_SURROGATES = 19
 SEGMENT_SEC = 10 * 60
 
 
-def get_nrem_intervals(scoring_path, fs):
+def get_nrem_intervals(scoring_path):
     states = loadmat(scoring_path)["states"].squeeze()
     nrem_mask = (states == 3).astype(int)
     diff = np.diff(np.concatenate(([0], nrem_mask, [0])))
@@ -76,9 +76,8 @@ def run_test():
     t0 = time.time()
     surrs = iaaft_surrogates(pooled_128, ns=19, verbose=True)
     t_iaaft = time.time() - t0
+    logging.info(f"IAAFT surrogate generation: {t_iaaft:.2f}s")
     for i, surrogate in enumerate(surrs):
-        logging.info(f"IAAFT surrogate generation ({i+1}x): {t_iaaft:.2f}s")
-
         t0 = time.time()
         r_surr, f_surr = fit_ar_on_prepared_signal(surrogate, TARGET_FS, n_jobs=-1, verbose=False)
         t_ar = time.time() - t0

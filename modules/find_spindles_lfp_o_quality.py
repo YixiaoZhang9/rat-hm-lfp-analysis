@@ -4,8 +4,8 @@ import time
 
 import joblib
 import numpy as np
+import statsmodels.api as sm
 from joblib import Parallel, delayed
-from spectrum import arburg
 from tqdm import tqdm
 
 from modules.ephys_preprocessing import bandpass_filter, downsampling
@@ -33,7 +33,7 @@ def tqdm_joblib(tqdm_object):
 
 def _fit_window(window, ar_order, target_fs, spindle_band):
     """Fit AR model to a single window and return (best_r, best_freq)."""
-    a, noise, _ = arburg(window, order=ar_order)
+    a, _ = sm.regression.linear_model.burg(window, order=ar_order)
     poles = np.roots(np.r_[1, -a])
     poles = poles[np.imag(poles) > 0]
     frequencies = np.angle(poles) * target_fs / (2 * np.pi)
