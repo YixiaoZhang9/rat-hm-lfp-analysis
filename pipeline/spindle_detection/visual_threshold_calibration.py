@@ -86,8 +86,8 @@ def interactive_visual_threshold(raw_chunk, fs, target_fs, r_timeseries, window_
     threshold_slider = Slider(
         ax=ax_slider,
         label='Threshold (rb)',
-        valmin=0.80,
-        valmax=0.99,
+        valmin=0.70,
+        valmax=0.90,
         valinit=init_threshold,
         valstep=0.005
     )
