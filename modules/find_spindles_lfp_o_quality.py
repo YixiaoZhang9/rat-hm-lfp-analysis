@@ -119,11 +119,11 @@ def find_spindles_lfp(
     target_fs=128,
     ar_order=8,
     window_sec=1.0,
-    upper_threshold=0.92,
-    lower_threshold=0.90,
+    upper_threshold=0.75,
     spindle_band=(10, 15),
     n_jobs=-1,
 ):
+    lower_threshold = upper_threshold - 0.02
     t_start = time.time()
     logging.info(f"Starting spindle detection. Input signal length: {len(raw_signal)}, original fs: {fs}")
 
