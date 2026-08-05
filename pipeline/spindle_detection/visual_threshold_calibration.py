@@ -77,19 +77,19 @@ def interactive_visual_threshold(raw_chunk, fs, target_fs, r_timeseries, window_
     axes[2].plot(t_r, r_timeseries, color='red', linewidth=1.5)
     axes[2].set_ylabel('Damping (r-value)')
     axes[2].set_xlabel('Time (seconds)')
-    axes[2].set_ylim(0.6, 0.9)
+    axes[2].set_ylim(0.5, 0.9)
 
-    init_threshold = 0.8
+    init_threshold = 0.7
     hline = axes[2].axhline(init_threshold, color='green', linestyle='--', linewidth=2)
 
     ax_slider = plt.axes([0.15, 0.05, 0.7, 0.03])
     threshold_slider = Slider(
         ax=ax_slider,
         label='Threshold (rb)',
-        valmin=0.60,
+        valmin=0.50,
         valmax=0.90,
         valinit=init_threshold,
-        valstep=0.005
+        valstep=0.01
     )
 
     def update(val):
