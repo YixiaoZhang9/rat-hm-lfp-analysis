@@ -83,17 +83,40 @@ def run_test():
 
     # Statistical Threshold Validation
     if len(valid_r_real) > 0:
-        mean_r_real = np.mean(valid_r_real)
         all_surr_r = np.concatenate(surrogate_valid_r_distributions)
-        mean_r_surr = np.mean(all_surr_r)
 
-        ratio = mean_r_real / mean_r_surr
-        percentage_diff = (mean_r_real - mean_r_surr) / mean_r_surr * 100
+        logging.info("Sweeping thresholds to find where Real vs Surrogate difference is ~92%...")
+        logging.info("Threshold | Real Count | Surr (Avg) | % Difference")
+        logging.info("-" * 55)
 
-        logging.info(f"Mean R (Real, 10-15Hz): {mean_r_real:.4f}")
-        logging.info(f"Mean R (Surrogates, 10-15Hz): {mean_r_surr:.4f}")
-        logging.info(f"Ratio Real/Surrogate: {ratio:.4f}")
-        logging.info(f"Percentage Difference: {percentage_diff:.2f}%")
+        # Test thresholds from 0.80 to 0.98
+        thresholds = np.arange(0.80, 0.99, 0.01)
+
+        best_threshold = None
+        closest_diff = float('inf')
+
+        for thresh in thresholds:
+            # How many windows exceed this threshold?
+            count_real = np.sum(valid_r_real >= thresh)
+
+            # Average number of surrogate windows exceeding the threshold
+            count_surr_avg = np.sum(all_surr_r >= thresh) / N_SURROGATES
+
+            if count_real > 0:
+                # Percentage difference (how many more real events than random noise events)
+                pct_diff = ((count_real - count_surr_avg) / count_real) * 100
+            else:
+                pct_diff = 0.0
+
+            logging.info(f"{thresh:.2f}      | {count_real:<10} | {count_surr_avg:<10.1f} | {pct_diff:.2f}%")
+
+            # Find the threshold that gets closest to a 92% difference
+            if count_real > 0 and abs(pct_diff - 92.0) < closest_diff:
+                closest_diff = abs(pct_diff - 92.0)
+                best_threshold = thresh
+
+        logging.info("-" * 55)
+        logging.info(f"Based on a target difference of 92%, your recommended threshold (rb) is: {best_threshold:.2f}")
 
 if __name__ == "__main__":
     run_test()
