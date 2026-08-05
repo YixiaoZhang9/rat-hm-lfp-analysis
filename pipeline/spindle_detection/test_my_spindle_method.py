@@ -3,6 +3,7 @@ import os
 import sys
 
 import numpy as np
+import pandas as pd
 from scipy.io import loadmat
 
 # Add project root to sys.path
@@ -81,7 +82,7 @@ def run_test():
             f"Processing segment {i+1}/{len(nrem_intervals)} ({start:.1f}s - {end:.1f}s)..."
         )
 
-        spindles = find_spindles_lfp(segment, fs=FS)
+        spindles = find_spindles_lfp(segment, fs=FS, upper_threshold=0.70)
 
         if len(spindles) > 0:
             # Adjust time to global recording time
@@ -91,12 +92,18 @@ def run_test():
             keep_mask = (spindles[:, 0] >= start) & (spindles[:, 2] <= end)
             all_spindles.append(spindles[keep_mask])
 
-    if all_spindles:
-        final_spindles = np.vstack(all_spindles)
-        logging.info(f"Detection complete. Total NREM spindles: {len(final_spindles)}")
-        print(final_spindles[:5])
-    else:
-        logging.info("No spindles detected in NREM.")
+            if all_spindles:
+                    final_spindles = np.vstack(all_spindles)
+                    logging.info(f"Detection complete. Total NREM spindles: {len(final_spindles)}")
+                    # Create a DataFrame with column names
+                    df_spindles = pd.DataFrame(
+                        final_spindles,
+                        columns=["Start_s", "Peak_s", "End_s", "Duration_s", "Max_R", "Peak_Freq_Hz"]
+                    )
+
+                    print("\n", df_spindles.head(), "\n")
+            else:
+                logging.info("No spindles detected in NREM.")
 
 
 if __name__ == "__main__":
