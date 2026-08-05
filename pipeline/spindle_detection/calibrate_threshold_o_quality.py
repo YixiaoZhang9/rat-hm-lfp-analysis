@@ -7,7 +7,6 @@ import numpy as np
 from scipy.io import loadmat
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
 from modules.ephys_preprocessing import bandpass_filter, downsampling
 from modules.find_spindles_lfp_o_quality import fit_ar_on_prepared_signal
 from modules.iaaft import surrogates as iaaft_surrogates
@@ -17,9 +16,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 FS = 1000
 TARGET_FS = 128
-N_SURROGATES = 19
+N_SURROGATES = 9
 SEGMENT_SEC = 10 * 60
-
 
 def get_nrem_intervals(scoring_path):
     states = loadmat(scoring_path)["states"].squeeze()
@@ -31,18 +29,24 @@ def get_nrem_intervals(scoring_path):
         return np.empty((0, 2))
     return np.column_stack((starts, ends))
 
-
-def pool_nrem_raw(raw_signal, nrem_intervals, fs, max_sec):
+def get_random_nrem_segment(raw_signal, nrem_intervals, fs, target_sec):
     chunks = []
-    total_sec = 0.0
     for start, end in nrem_intervals:
-        if total_sec >= max_sec:
-            break
         s_idx, e_idx = int(start * fs), int(end * fs)
         chunks.append(raw_signal[s_idx:e_idx])
-        total_sec += (end - start)
-    return np.concatenate(chunks) if chunks else np.array([])
 
+    if not chunks:
+        return np.array([])
+
+    pooled_signal = np.concatenate(chunks)
+    target_samples = target_sec * fs
+
+    if len(pooled_signal) <= target_samples:
+        logging.warning("Total NREM duration is less than the target segment length.")
+        return pooled_signal
+
+    start_idx = np.random.randint(0, len(pooled_signal) - target_samples)
+    return pooled_signal[start_idx : start_idx + target_samples]
 
 def run_test():
     dir_base = get_path("R1_8_root")
@@ -57,36 +61,39 @@ def run_test():
 
     raw_signal = loadmat(data_path)["data"].squeeze()
     nrem_intervals = get_nrem_intervals(scoring_path)
-    logging.info(f"Found {len(nrem_intervals)} NREM segments.")
 
-    pooled_real_raw = pool_nrem_raw(raw_signal, nrem_intervals, FS, SEGMENT_SEC)
-    logging.info(f"Pooled NREM (raw, {FS}Hz): {len(pooled_real_raw)/FS:.1f}s")
-
-    filtered = bandpass_filter(pooled_real_raw, lowcut=0.1, highcut=100, fs=FS)
+    random_real_raw = get_random_nrem_segment(raw_signal, nrem_intervals, FS, SEGMENT_SEC)
+    filtered = bandpass_filter(random_real_raw, lowcut=0.1, highcut=100, fs=FS)
     pooled_128 = downsampling(filtered, FS, TARGET_FS)
-    logging.info(f"Downsampled to {TARGET_FS}Hz: {len(pooled_128)} samples "
-                 f"({len(pooled_128)/TARGET_FS:.1f}s)")
 
-    t0 = time.time()
+    # Process Real Signal
     r_real, f_real = fit_ar_on_prepared_signal(pooled_128, TARGET_FS, n_jobs=-1, verbose=False)
-    t_real = time.time() - t0
-    real_max_r = np.nanmax(r_real) if len(r_real) else np.nan
-    logging.info(f"Real signal: max_r={real_max_r:.3f} ({t_real:.1f}s)")
 
-    t0 = time.time()
-    surrs = iaaft_surrogates(pooled_128, ns=19, verbose=True)
-    t_iaaft = time.time() - t0
-    logging.info(f"IAAFT surrogate generation: {t_iaaft:.2f}s")
+    # Filter out windows where no 10-15Hz pole was found
+    valid_r_real = r_real[~np.isnan(f_real)]
+
+    # Generate Surrogates
+    surrs = iaaft_surrogates(pooled_128, ns=N_SURROGATES, verbose=True)
+    surrogate_valid_r_distributions = []
+
     for i, surrogate in enumerate(surrs):
-        t0 = time.time()
         r_surr, f_surr = fit_ar_on_prepared_signal(surrogate, TARGET_FS, n_jobs=-1, verbose=False)
-        t_ar = time.time() - t0
-        surr_max_r = np.nanmax(r_surr) if len(r_surr) else np.nan
-        logging.info(f"Surrogate {i+1}: max_r={surr_max_r:.3f} (IAAFT {t_iaaft:.2f}s + AR fit {t_ar:.2f}s)")
+        valid_r_surr = r_surr[~np.isnan(f_surr)]
+        surrogate_valid_r_distributions.append(valid_r_surr)
 
-        est_total = (t_iaaft + t_ar) * (i + 1)
-        logging.info(f"Estimated total time for {i + 1} surrogates: {est_total/60:.2f} min")
+    # Statistical Threshold Validation
+    if len(valid_r_real) > 0:
+        mean_r_real = np.mean(valid_r_real)
+        all_surr_r = np.concatenate(surrogate_valid_r_distributions)
+        mean_r_surr = np.mean(all_surr_r)
 
+        ratio = mean_r_real / mean_r_surr
+        percentage_diff = (mean_r_real - mean_r_surr) / mean_r_surr * 100
+
+        logging.info(f"Mean R (Real, 10-15Hz): {mean_r_real:.4f}")
+        logging.info(f"Mean R (Surrogates, 10-15Hz): {mean_r_surr:.4f}")
+        logging.info(f"Ratio Real/Surrogate: {ratio:.4f}")
+        logging.info(f"Percentage Difference: {percentage_diff:.2f}%")
 
 if __name__ == "__main__":
     run_test()
