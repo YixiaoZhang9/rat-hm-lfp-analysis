@@ -90,7 +90,7 @@ def run_test():
         logging.info("-" * 55)
 
         # Test thresholds from 0.80 to 0.98
-        thresholds = np.arange(0.80, 0.99, 0.01)
+        thresholds = np.arange(0.70, 0.90, 0.01)
 
         best_threshold = None
         closest_diff = float('inf')
