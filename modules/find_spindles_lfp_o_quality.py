@@ -10,13 +10,11 @@ from tqdm import tqdm
 
 from modules.ephys_preprocessing import bandpass_filter, downsampling
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 @contextlib.contextmanager
 def tqdm_joblib(tqdm_object):
-    """Context manager to patch joblib to report progress into a tqdm bar."""
     class TqdmBatchCompletionCallback(joblib.parallel.BatchCompletionCallBack):
         def __call__(self, *args, **kwargs):
             tqdm_object.update(n=self.batch_size)
@@ -49,63 +47,187 @@ def _fit_window(window, ar_order, target_fs, spindle_band):
     return 0.0, np.nan
 
 
+def _fit_windows_at_starts(signal, starts, window_samples, ar_order, target_fs, spindle_band, n_jobs, verbose, desc):
+    """Fit AR windows starting at arbitrary sample indices (used for both coarse & fine passes)."""
+    if len(starts) == 0:
+        return np.array([]), np.array([])
+
+    if verbose:
+        with tqdm_joblib(tqdm(total=len(starts), desc=desc, unit="win")):
+            results = Parallel(n_jobs=n_jobs, prefer="processes")(
+                delayed(_fit_window)(signal[s:s + window_samples], ar_order, target_fs, spindle_band)
+                for s in starts
+            )
+    else:
+        results = Parallel(n_jobs=n_jobs, prefer="processes")(
+            delayed(_fit_window)(signal[s:s + window_samples], ar_order, target_fs, spindle_band)
+            for s in starts
+        )
+
+    r_vals = np.array([r for r, f in results])
+    f_vals = np.array([f for r, f in results])
+    return r_vals, f_vals
+
+
 def fit_ar_on_prepared_signal(
-    signal,
-    target_fs=128,
-    ar_order=8,
-    window_sec=1.0,
-    spindle_band=(10, 15),
-    n_jobs=-1,
-    verbose=True,
+    signal, target_fs=128, ar_order=8, window_sec=1.0,
+    spindle_band=(10, 15), n_jobs=-1, verbose=True,
 ):
     """
-    Fit AR(8) models across overlapping windows of a signal that is ALREADY
-    filtered and downsampled (i.e. skips steps 1 & 2 of the pipeline).
-
-    Returns
-    -------
-    r_timeseries, f_timeseries : np.ndarray
+    Full-resolution method: 1-sample-shift AR fitting across the ENTIRE
+    signal. Slow but exhaustive -- required for calibration/significance
+    testing where an unbiased global max r is needed (see discussion:
+    the two-pass method can systematically under/over-estimate peaks
+    near coarse-window boundaries).
     """
     window_samples = int(window_sec * target_fs)
-
     if len(signal) < window_samples:
         return np.array([]), np.array([])
 
     total_windows = len(signal) - window_samples + 1
-    windows = np.lib.stride_tricks.sliding_window_view(signal, window_samples)
+    starts = np.arange(total_windows)
+    return _fit_windows_at_starts(
+        signal, starts, window_samples, ar_order, target_fs, spindle_band,
+        n_jobs, verbose, desc="AR fitting (full-res)"
+    )
 
-    if verbose:
-        with tqdm_joblib(tqdm(total=total_windows, desc="AR fitting", unit="win")):
-            results = Parallel(n_jobs=n_jobs, prefer="processes")(
-                delayed(_fit_window)(windows[start], ar_order, target_fs, spindle_band)
-                for start in range(total_windows)
-            )
-    else:
-        results = Parallel(n_jobs=n_jobs, prefer="processes")(
-            delayed(_fit_window)(windows[start], ar_order, target_fs, spindle_band)
-            for start in range(total_windows)
+
+def fit_ar_two_pass(
+    signal, target_fs=128, ar_order=8, window_sec=1.0,
+    spindle_band=(10, 15), ra=0.90, fine_step_frac=1 / 16,
+    n_jobs=-1, verbose=True,
+):
+    """
+    Paper's two-pass strategy (Olbrich & Achermann 2005):
+    1. Coarse scan: non-overlapping 1-s windows across the WHOLE signal.
+    2. Wherever coarse r >= ra, flag that segment AND the previous one.
+    3. Fine scan (1/16 s step) ONLY within flagged regions.
+
+    Returns
+    -------
+    regions : list of dicts, each with keys:
+        'start_sample', 'r', 'f', 'sample_starts' (fine-grained, absolute sample idx)
+    """
+    window_samples = int(window_sec * target_fs)
+    fine_step = max(1, int(round(window_samples * fine_step_frac)))
+
+    if len(signal) < window_samples:
+        return []
+
+    n_coarse = (len(signal) - window_samples) // window_samples + 1
+    coarse_starts = np.arange(n_coarse) * window_samples
+    r_coarse, f_coarse = _fit_windows_at_starts(
+        signal, coarse_starts, window_samples, ar_order, target_fs, spindle_band,
+        n_jobs, verbose, desc="Coarse AR scan"
+    )
+
+    flagged = np.zeros(n_coarse, dtype=bool)
+    hits = np.where(r_coarse >= ra)[0]
+    flagged[hits] = True
+    flagged[np.clip(hits - 1, 0, n_coarse - 1)] = True
+
+    if not flagged.any():
+        logging.info("No candidate regions found in coarse scan (nothing exceeded ra).")
+        return []
+
+    regions = []
+    i = 0
+    while i < n_coarse:
+        if flagged[i]:
+            j = i
+            while j + 1 < n_coarse and flagged[j + 1]:
+                j += 1
+            region_start = coarse_starts[i]
+            region_end = coarse_starts[j] + window_samples  # exclusive
+            regions.append((region_start, region_end))
+            i = j + 1
+        else:
+            i += 1
+
+    logging.info(f"Coarse scan flagged {len(regions)} region(s) for fine-grained analysis "
+                 f"({sum(e - s for s, e in regions) / target_fs:.1f}s of {len(signal) / target_fs:.1f}s total).")
+
+    fine_regions = []
+    for region_start, region_end in regions:
+        last_valid_start = region_end - window_samples
+        if last_valid_start < region_start:
+            continue
+        fine_starts = np.arange(region_start, last_valid_start + 1, fine_step)
+        r_fine, f_fine = _fit_windows_at_starts(
+            signal, fine_starts, window_samples, ar_order, target_fs, spindle_band,
+            n_jobs, verbose=False, desc="Fine AR scan"
         )
+        fine_regions.append({
+            "start_sample": region_start,
+            "r": r_fine,
+            "f": f_fine,
+            "sample_starts": fine_starts,
+        })
 
-    r_timeseries = np.array([r for r, f in results])
-    f_timeseries = np.array([f for r, f in results])
-    return r_timeseries, f_timeseries
+    return fine_regions
+
+
+def _detect_events_in_region(r, f, sample_starts, target_fs, window_samples, upper_threshold, lower_threshold):
+    """
+    Correct t1/t2 event logic per Olbrich & Achermann (2005):
+    t1 = first upward crossing of rb.
+    t2 = LAST time r was >= rb, before it falls below ra.
+    """
+    events = []
+    in_event = False
+    start_i = None
+    last_above_rb_i = None
+
+    for i, r_val in enumerate(r):
+        if not in_event and r_val >= upper_threshold:
+            in_event = True
+            start_i = i
+            last_above_rb_i = i
+        elif in_event:
+            if r_val >= upper_threshold:
+                last_above_rb_i = i
+            if r_val < lower_threshold:
+                _finalize_event(events, r, f, sample_starts, target_fs, window_samples,
+                                 start_i, last_above_rb_i)
+                in_event = False
+
+    if in_event:
+        _finalize_event(events, r, f, sample_starts, target_fs, window_samples,
+                         start_i, last_above_rb_i)
+
+    return events
+
+
+def _finalize_event(events, r, f, sample_starts, target_fs, window_samples, start_i, end_i):
+    peak_relative = np.argmax(r[start_i:end_i + 1])
+    peak_i = start_i + peak_relative
+
+    max_r = r[peak_i]
+    peak_frequency = f[peak_i]
+
+    start_time = sample_starts[start_i] / target_fs
+    end_time = (sample_starts[end_i] + window_samples) / target_fs
+    peak_time = sample_starts[peak_i] / target_fs
+    duration = end_time - start_time
+
+    events.append([start_time, peak_time, end_time, duration, max_r, peak_frequency])
+
+
+def _detect_events_full_res(r_timeseries, f_timeseries, target_fs, window_samples, upper_threshold, lower_threshold):
+    """Event detection over a single, contiguous, full-resolution r/f timeseries
+    (i.e. sample_starts are just 0..N-1)."""
+    sample_starts = np.arange(len(r_timeseries))
+    return _detect_events_in_region(
+        r_timeseries, f_timeseries, sample_starts, target_fs, window_samples,
+        upper_threshold, lower_threshold,
+    )
 
 
 def compute_r_f_timeseries(
-    raw_signal,
-    fs,
-    target_fs=128,
-    ar_order=8,
-    window_sec=1.0,
-    spindle_band=(10, 15),
-    n_jobs=-1,
-    verbose=True,
+    raw_signal, fs, target_fs=128, ar_order=8, window_sec=1.0,
+    spindle_band=(10, 15), n_jobs=-1, verbose=True,
 ):
-    """
-    Full pipeline: band-pass filter (0.1-100 Hz) -> downsample to target_fs
-    -> AR(8) fitting. Used both by the detector (find_spindles_lfp) and by
-    the threshold calibration script.
-    """
+    """Full pipeline (unchanged): filter -> downsample -> full-res AR fitting."""
     filtered_signal = bandpass_filter(raw_signal, lowcut=0.1, highcut=100, fs=fs)
     signal = downsampling(filtered_signal, fs, target_fs)
     return fit_ar_on_prepared_signal(
@@ -114,104 +236,62 @@ def compute_r_f_timeseries(
 
 
 def find_spindles_lfp(
-    raw_signal,
-    fs,
-    target_fs=128,
-    ar_order=8,
-    window_sec=1.0,
-    upper_threshold=0.75,
-    spindle_band=(10, 15),
-    n_jobs=-1,
+    raw_signal, fs, target_fs=128, ar_order=8, window_sec=1.0,
+    upper_threshold=0.75, spindle_band=(10, 15), n_jobs=-1,
+    method="two_pass",
 ):
+    """
+    Spindle detection with correct t1/t2 event boundary logic.
+
+    Parameters
+    ----------
+    method : {"two_pass", "full"}
+        "two_pass" (default): paper's coarse/fine strategy (Olbrich &
+            Achermann 2005). Fast, recommended for standard detection runs.
+        "full": exhaustive 1-sample-shift AR fitting across the entire
+            signal. Slow, but avoids any risk of missing peaks near
+            coarse-window boundaries. Recommended for validation runs or
+            anywhere exact global-max fidelity matters (e.g. calibration-
+            style analyses run through this function).
+    """
+    if method not in ("two_pass", "full"):
+        raise ValueError(f"method must be 'two_pass' or 'full', got {method!r}")
+
     lower_threshold = upper_threshold - 0.02
     t_start = time.time()
-    logging.info(f"Starting spindle detection. Input signal length: {len(raw_signal)}, original fs: {fs}")
+    logging.info(f"Starting spindle detection (method={method}). "
+                 f"Input signal length: {len(raw_signal)}, original fs: {fs}")
 
-    r_timeseries, f_timeseries = compute_r_f_timeseries(
-        raw_signal=raw_signal,
-        fs=fs,
-        target_fs=target_fs,
-        ar_order=ar_order,
-        window_sec=window_sec,
-        spindle_band=spindle_band,
-        n_jobs=n_jobs,
-        verbose=True,
-    )
-
+    filtered_signal = bandpass_filter(raw_signal, lowcut=0.1, highcut=100, fs=fs)
+    signal = downsampling(filtered_signal, fs, target_fs)
     window_samples = int(window_sec * target_fs)
 
-    if len(r_timeseries) == 0:
-        logging.warning("Signal too short for window.")
-        return np.empty((0, 6))
+    if method == "two_pass":
+        fine_regions = fit_ar_two_pass(
+            signal, target_fs=target_fs, ar_order=ar_order, window_sec=window_sec,
+            spindle_band=spindle_band, ra=lower_threshold, n_jobs=n_jobs, verbose=True,
+        )
+        all_events = []
+        for region in fine_regions:
+            events = _detect_events_in_region(
+                region["r"], region["f"], region["sample_starts"],
+                target_fs, window_samples, upper_threshold, lower_threshold,
+            )
+            all_events.extend(events)
 
-    # Detect events using upper/lower thresholds
-    logging.info(f"Scanning r-timeseries for spindle events "
-                 f"(upper={upper_threshold}, lower={lower_threshold})...")
-    t0 = time.time()
-    events = []
-    in_event = False
-    start_idx = None
+    else:  # method == "full"
+        r_timeseries, f_timeseries = fit_ar_on_prepared_signal(
+            signal, target_fs=target_fs, ar_order=ar_order, window_sec=window_sec,
+            spindle_band=spindle_band, n_jobs=n_jobs, verbose=True,
+        )
+        if len(r_timeseries) == 0:
+            logging.warning("Signal too short for window.")
+            return np.empty((0, 6))
+        all_events = _detect_events_full_res(
+            r_timeseries, f_timeseries, target_fs, window_samples,
+            upper_threshold, lower_threshold,
+        )
 
-    for i, r in enumerate(r_timeseries):
-        if not in_event and r >= upper_threshold:
-            in_event = True
-            start_idx = i
+    logging.info(f"Detection complete in {time.time() - t_start:.2f}s. Found {len(all_events)} events.")
 
-        elif in_event and r < lower_threshold:
-            end_idx = i - 1
-
-            event_slice = slice(start_idx, end_idx + 1)
-            peak_relative = np.argmax(r_timeseries[event_slice])
-            peak_idx = start_idx + peak_relative
-
-            max_r = r_timeseries[peak_idx]
-            peak_frequency = f_timeseries[peak_idx]
-
-            start_time = start_idx / target_fs
-            end_time = (end_idx + window_samples) / target_fs
-            duration = end_time - start_time
-
-            events.append([
-                start_time,
-                peak_idx / target_fs,
-                end_time,
-                duration,
-                max_r,
-                peak_frequency,
-            ])
-
-            in_event = False
-
-    if in_event:
-        end_idx = len(r_timeseries) - 1
-
-        event_slice = slice(start_idx, end_idx + 1)
-        peak_relative = np.argmax(r_timeseries[event_slice])
-        peak_idx = start_idx + peak_relative
-
-        max_r = r_timeseries[peak_idx]
-        peak_frequency = f_timeseries[peak_idx]
-
-        start_time = start_idx / target_fs
-        end_time = (end_idx + window_samples) / target_fs
-        duration = end_time - start_time
-
-        events.append([
-            start_time,
-            peak_idx / target_fs,
-            end_time,
-            duration,
-            max_r,
-            peak_frequency,
-        ])
-
-    logging.info(f"Event scan complete in {time.time() - t0:.2f}s. Found {len(events)} events.")
-
-    valid_r = r_timeseries[~np.isnan(f_timeseries)]
-    if valid_r.size > 0:
-        logging.info("--- Global R Statistics (in spindle band) ---")
-        logging.info(f"Min: {valid_r.min():.3f} | Max: {valid_r.max():.3f} | Avg: {valid_r.mean():.3f} | Std: {valid_r.std():.3f}")
-
-    logging.info(f"Total detection time: {time.time() - t_start:.2f}s.")
-
-    return np.asarray(events)
+    return np.asarray(all_events) if all_events else np.empty((0, 6))
