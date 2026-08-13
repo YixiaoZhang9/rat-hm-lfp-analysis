@@ -102,12 +102,12 @@ def interactive_visual_threshold(raw_chunk, fs, target_fs, r_timeseries, window_
 def run_visual_calibration():
     dir_base = get_path("R1_8_root")
     data_path = os.path.join(
-        dir_base, "R1-4/PreprocessedData/PL/1/202209029/postsleep/chan108_7.mat"
+        dir_base, "R1-4/PreprocessedData/HPC/1/20221006/postsleep/chan102_9.mat"
     )
     scoring_path = os.path.join(
         dir_base,
-        "R1-4/Scoring/1/202209029/postsleep/"
-        "Rat_HM_Ephys_TD_Rat1_202209029_postsleep_07_JM-eegstates.mat",
+        "R1-4/Scoring/1/20221006/postsleep/"
+        "Rat_HM_Ephys_TD_Rat1_20221006_postsleep_09_SW-eegstates.mat",
     )
 
     logging.info("Loading signal and scoring data...")

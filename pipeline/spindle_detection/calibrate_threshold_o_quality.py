@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import time
 
 import numpy as np
 from scipy.io import loadmat
@@ -50,12 +51,12 @@ def get_random_nrem_segment(raw_signal, nrem_intervals, fs, target_sec):
 def run_test():
     dir_base = get_path("R1_8_root")
     data_path = os.path.join(
-        dir_base, "R1-4/PreprocessedData/PL/1/202209029/postsleep/chan108_7.mat"
+        dir_base, "R1-4/PreprocessedData/HPC/1/20221006/postsleep/chan102_9.mat"
     )
     scoring_path = os.path.join(
         dir_base,
-        "R1-4/Scoring/1/202209029/postsleep/"
-        "Rat_HM_Ephys_TD_Rat1_202209029_postsleep_07_JM-eegstates.mat",
+        "R1-4/Scoring/1/20221006/postsleep/"
+        "Rat_HM_Ephys_TD_Rat1_20221006_postsleep_09_SW-eegstates.mat",
     )
 
     raw_signal = loadmat(data_path)["data"].squeeze()
