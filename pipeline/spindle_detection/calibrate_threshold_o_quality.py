@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 FS = 1000
 TARGET_FS = 128
-N_SURROGATES = 9
+N_SURROGATES = 4
 SEGMENT_SEC = 10 * 60
 TARGET_PCT_DIFF = 92.0
 
