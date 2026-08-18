@@ -13,12 +13,11 @@ import pandas as pd
 from scipy.io import loadmat
 from tqdm import tqdm
 
-from task_loader import TaskLoader
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from modules.ephys_preprocessing import bandpass_filter, downsampling
 from modules.find_spindles_lfp_o_quality import fit_ar_on_prepared_signal
 from modules.iaaft import surrogates as iaaft_surrogates
+from task_loader import TaskLoader
 
 # --------------------------------------------------------------------------- #
 # Config

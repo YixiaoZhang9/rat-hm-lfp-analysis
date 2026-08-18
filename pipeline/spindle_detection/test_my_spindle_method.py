@@ -12,10 +12,9 @@ import pandas as pd
 from scipy.io import loadmat
 from tqdm import tqdm
 
-from task_loader import TaskLoader
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from modules.find_spindles_lfp_o_quality import find_spindles_lfp
+from task_loader import TaskLoader
 
 # --------------------------------------------------------------------------- #
 # Config
