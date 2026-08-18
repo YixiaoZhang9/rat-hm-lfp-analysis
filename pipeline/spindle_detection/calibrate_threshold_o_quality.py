@@ -6,12 +6,14 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 from tqdm import tqdm
+
+from task_loader import TaskLoader
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from modules.ephys_preprocessing import bandpass_filter, downsampling
@@ -68,75 +70,6 @@ class TaskFailure(Exception):
         self.reason = reason
         self.detail = detail
         super().__init__(f"{reason}: {detail}" if detail else reason)
-
-
-# --------------------------------------------------------------------------- #
-# Task Loader Abstraction
-# --------------------------------------------------------------------------- #
-class TaskLoader:
-    def __init__(self, manifest_path: str):
-        self.manifest_path = manifest_path
-        try:
-            self._df = pd.read_csv(manifest_path)
-            for col in ["cohort", "rat", "region", "date"]:
-                if col in self._df.columns:
-                    self._df[col] = self._df[col].astype(str)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Manifest not found at {manifest_path}")
-
-    def filter(
-        self,
-        rat: Optional[Union[str, int, List[Union[str, int]]]] = None,
-        region: Optional[Union[str, List[str]]] = None,
-        cohort: Optional[Union[str, List[str]]] = None,
-        date: Optional[Union[str, int, List[Union[str, int]]]] = None
-    ) -> "TaskLoader":
-        new_loader = TaskLoader.__new__(TaskLoader)
-        new_loader.manifest_path = self.manifest_path
-        df = self._df.copy()
-
-        if rat is not None:
-            rats = [str(rat)] if isinstance(rat, (str, int)) else [str(r) for r in rat]
-            df = df[df["rat"].isin(rats)]
-        if region is not None:
-            regions = [region] if isinstance(region, str) else region
-            df = df[df["region"].isin(regions)]
-        if cohort is not None:
-            cohorts = [cohort] if isinstance(cohort, str) else cohort
-            df = df[df["cohort"].isin(cohorts)]
-        if date is not None:
-            dates = [str(date)] if isinstance(date, (str, int)) else [str(d) for d in date]
-            df = df[df["date"].isin(dates)]
-
-        new_loader._df = df
-        return new_loader
-
-    @property
-    def available_rats(self) -> List[str]:
-        return sorted(self._df["rat"].unique().tolist())
-
-    @property
-    def available_regions(self) -> List[str]:
-        return sorted(self._df["region"].unique().tolist())
-
-    def __len__(self) -> int:
-        return len(self._df)
-
-    def to_tasks(self) -> List[Dict]:
-        tasks = []
-        for _, row in self._df.iterrows():
-            data_path = Path(row["data_path"])
-            tasks.append({
-                "cohort": row["cohort"],
-                "rat": row["rat"],
-                "region": row["region"],
-                "date": row["date"],
-                "data_path": str(data_path),
-                "file_name": data_path.name,
-                "scoring_path": str(row["scoring_path"]),
-            })
-        return tasks
-
 
 # --------------------------------------------------------------------------- #
 # Core logic
