@@ -5,6 +5,7 @@ import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 from modules.ephys_preprocessing import bandpass_filter, downsampling
 from modules.find_spindles_lfp_o_quality import fit_ar_on_prepared_signal
 from modules.iaaft import surrogates as iaaft_surrogates
-from modules.project_config import get_path
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -68,6 +68,80 @@ class TaskFailure(Exception):
 
 
 # --------------------------------------------------------------------------- #
+# Task Loader Abstraction
+# --------------------------------------------------------------------------- #
+class TaskLoader:
+    def __init__(self, manifest_path: str):
+        self.manifest_path = manifest_path
+        try:
+            self._df = pd.read_csv(manifest_path)
+            # Standardize columns to string to avoid int/str mismatching
+            for col in ["cohort", "rat", "region", "date"]:
+                if col in self._df.columns:
+                    self._df[col] = self._df[col].astype(str)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Manifest not found at {manifest_path}")
+
+    def filter(
+        self,
+        rat: Optional[Union[str, int, List[Union[str, int]]]] = None,
+        region: Optional[Union[str, List[str]]] = None,
+        cohort: Optional[Union[str, List[str]]] = None,
+        date: Optional[Union[str, int, List[Union[str, int]]]] = None
+    ) -> "TaskLoader":
+        """Returns a new TaskLoader instance with the filtered subset of data."""
+        new_loader = TaskLoader.__new__(TaskLoader)
+        new_loader.manifest_path = self.manifest_path
+        df = self._df.copy()
+
+        if rat is not None:
+            rats = [str(rat)] if isinstance(rat, (str, int)) else [str(r) for r in rat]
+            df = df[df["rat"].isin(rats)]
+
+        if region is not None:
+            regions = [region] if isinstance(region, str) else region
+            df = df[df["region"].isin(regions)]
+
+        if cohort is not None:
+            cohorts = [cohort] if isinstance(cohort, str) else cohort
+            df = df[df["cohort"].isin(cohorts)]
+
+        if date is not None:
+            dates = [str(date)] if isinstance(date, (str, int)) else [str(d) for d in date]
+            df = df[df["date"].isin(dates)]
+
+        new_loader._df = df
+        return new_loader
+
+    @property
+    def available_rats(self) -> List[str]:
+        return sorted(self._df["rat"].unique().tolist())
+
+    @property
+    def available_regions(self) -> List[str]:
+        return sorted(self._df["region"].unique().tolist())
+
+    def __len__(self) -> int:
+        return len(self._df)
+
+    def to_tasks(self) -> List[Dict]:
+        """Converts the current internal dataframe into the task dictionary format."""
+        tasks = []
+        for _, row in self._df.iterrows():
+            data_path = Path(row["data_path"])
+            tasks.append({
+                "cohort": row["cohort"],
+                "rat": row["rat"],
+                "region": row["region"],
+                "date": row["date"],
+                "data_path": str(data_path),
+                "file_name": data_path.name,
+                "scoring_path": str(row["scoring_path"]),
+            })
+        return tasks
+
+
+# --------------------------------------------------------------------------- #
 # Core logic
 # --------------------------------------------------------------------------- #
 def get_nrem_intervals(scoring_path):
@@ -101,11 +175,6 @@ def get_random_nrem_segment(raw_signal, nrem_intervals, fs, target_sec):
 
 
 def calculate_optimal_threshold(data_path, scoring_path):
-    """
-    Raises TaskFailure with a short reason string on any expected failure
-    mode, so the caller can tally *why* things failed instead of just
-    counting how many did.
-    """
     try:
         raw_signal = loadmat(data_path)["data"].squeeze()
     except Exception as e:
@@ -170,109 +239,23 @@ def calculate_optimal_threshold(data_path, scoring_path):
 
 
 # --------------------------------------------------------------------------- #
-# Task discovery
-# --------------------------------------------------------------------------- #
-def discover_tasks(root_dirs):
-    tasks = []
-    skip_counts = Counter()
-
-    for root in root_dirs:
-        if not root.exists():
-            logger.warning(f"Root path not found, skipping: {root}")
-            continue
-
-        cohort_dirs = [d for d in root.iterdir() if d.is_dir() and (d / "PreprocessedData").exists()]
-        logger.info(f"{root}: found {len(cohort_dirs)} cohort dir(s)")
-
-        for cohort_dir in cohort_dirs:
-            preprocessed_dir = cohort_dir / "PreprocessedData"
-            scoring_dir = cohort_dir / "Scoring"
-
-            for region_path in preprocessed_dir.iterdir():
-                if not region_path.is_dir():
-                    continue
-                region = region_path.name
-
-                for rat_path in region_path.iterdir():
-                    if not rat_path.is_dir():
-                        continue
-                    rat = rat_path.name
-
-                    for date_path in rat_path.iterdir():
-                        if not date_path.is_dir():
-                            continue
-                        date = date_path.name
-
-                        data_dir = date_path / "postsleep"
-                        scoring_date_dir = scoring_dir / rat / date / "postsleep"
-
-                        if not data_dir.exists():
-                            skip_counts["no postsleep data dir"] += 1
-                            continue
-                        if not scoring_date_dir.exists():
-                            skip_counts["no matching scoring dir"] += 1
-                            continue
-
-                        data_files = list(data_dir.glob("*.mat"))
-                        scoring_files = list(scoring_date_dir.glob("*SW-eegstates.mat"))
-
-                        if not data_files:
-                            skip_counts["no .mat data files"] += 1
-                            continue
-                        if not scoring_files:
-                            skip_counts["no SW-eegstates scoring file"] += 1
-                            continue
-
-                        scoring_path = scoring_files[0]
-                        if len(scoring_files) > 1:
-                            logger.debug(
-                                f"{rat}/{date}: {len(scoring_files)} scoring files found, "
-                                f"using {scoring_path.name}"
-                            )
-
-                        for data_path in data_files:
-                            tasks.append({
-                                "cohort": cohort_dir.name,
-                                "rat": rat,
-                                "region": region,
-                                "date": date,
-                                "data_path": str(data_path),
-                                "file_name": data_path.name,
-                                "scoring_path": str(scoring_path),
-                            })
-
-    if skip_counts:
-        logger.info("Discovery skip summary: " + ", ".join(f"{k}={v}" for k, v in skip_counts.items()))
-
-    return tasks
-
-
-# --------------------------------------------------------------------------- #
 # Batch processing
 # --------------------------------------------------------------------------- #
-def run_batch_processing():
-    r1_8_path = Path(get_path("R1_8_root"))
-    r9_16_path = Path(get_path("R9_16_root"))
-    root_dirs = [r1_8_path, r9_16_path]
-
-    logger.info("Discovering tasks...")
-    tasks = discover_tasks(root_dirs)
-
+def run_batch_processing(tasks: List[Dict]):
     if not tasks:
-        logger.error("No valid data files discovered across roots. Nothing to do.")
+        logger.error("No valid data files provided. Nothing to do.")
         return
 
-    logger.info(f"Discovered {len(tasks)} file(s) to process.")
+    logger.info(f"Loaded {len(tasks)} file(s) to process.")
 
     results = []
-    failures = []  # list of dicts: task metadata + reason
+    failures = []
     failure_reason_counts = Counter()
 
     pbar = tqdm(tasks, desc="Processing Files", unit="file", dynamic_ncols=True)
 
     for i, task in enumerate(pbar, start=1):
         pbar.set_postfix({
-            "Cohort": task["cohort"],
             "Rat": task["rat"],
             "Region": task["region"],
             "Date": task["date"],
@@ -307,7 +290,6 @@ def run_batch_processing():
             )
 
         except Exception as e:
-            # Anything unexpected: log full traceback to the debug file, keep going.
             elapsed = time.time() - t0
             failure_reason_counts["unexpected error"] += 1
             failures.append({**task, "reason": "unexpected error", "detail": str(e)})
@@ -363,4 +345,18 @@ def run_batch_processing():
 
 
 if __name__ == "__main__":
-    run_batch_processing()
+    # 1. Initialize the loader with your generated manifest
+    loader = TaskLoader("tasks_manifest.csv")
+
+    # 2. Extract the specific subset you want to process.
+    # To run everything, simply use: loader.to_tasks()
+    filtered_loader = loader.filter(
+        rat=[1, 2],
+        region="HPC",
+        cohort="R1-4"
+    )
+
+    tasks_to_run = filtered_loader.to_tasks()
+
+    # 3. Pass the resulting task list directly into the processing pipeline
+    run_batch_processing(tasks_to_run)
