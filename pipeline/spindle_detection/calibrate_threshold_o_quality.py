@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -23,8 +24,10 @@ from modules.iaaft import surrogates as iaaft_surrogates
 FS = 1000
 TARGET_FS = 128
 N_SURROGATES = 4
-SEGMENT_SEC = 10 * 60
+SEGMENT_SEC = 5 * 60
 TARGET_PCT_DIFF = 92.0
+
+MAX_WORKERS = max(1, os.cpu_count() - 2)  # Leave a couple of cores free for the OS
 
 CHECKPOINT_EVERY = 25          # save partial results to disk every N processed files
 OUTPUT_DIR = Path("results")   # where csvs + logs go
@@ -75,7 +78,6 @@ class TaskLoader:
         self.manifest_path = manifest_path
         try:
             self._df = pd.read_csv(manifest_path)
-            # Standardize columns to string to avoid int/str mismatching
             for col in ["cohort", "rat", "region", "date"]:
                 if col in self._df.columns:
                     self._df[col] = self._df[col].astype(str)
@@ -89,7 +91,6 @@ class TaskLoader:
         cohort: Optional[Union[str, List[str]]] = None,
         date: Optional[Union[str, int, List[Union[str, int]]]] = None
     ) -> "TaskLoader":
-        """Returns a new TaskLoader instance with the filtered subset of data."""
         new_loader = TaskLoader.__new__(TaskLoader)
         new_loader.manifest_path = self.manifest_path
         df = self._df.copy()
@@ -97,15 +98,12 @@ class TaskLoader:
         if rat is not None:
             rats = [str(rat)] if isinstance(rat, (str, int)) else [str(r) for r in rat]
             df = df[df["rat"].isin(rats)]
-
         if region is not None:
             regions = [region] if isinstance(region, str) else region
             df = df[df["region"].isin(regions)]
-
         if cohort is not None:
             cohorts = [cohort] if isinstance(cohort, str) else cohort
             df = df[df["cohort"].isin(cohorts)]
-
         if date is not None:
             dates = [str(date)] if isinstance(date, (str, int)) else [str(d) for d in date]
             df = df[df["date"].isin(dates)]
@@ -125,7 +123,6 @@ class TaskLoader:
         return len(self._df)
 
     def to_tasks(self) -> List[Dict]:
-        """Converts the current internal dataframe into the task dictionary format."""
         tasks = []
         for _, row in self._df.iterrows():
             data_path = Path(row["data_path"])
@@ -192,26 +189,22 @@ def calculate_optimal_threshold(data_path, scoring_path):
     if random_real_raw.size == 0:
         raise TaskFailure("empty NREM segment after pooling")
 
-    logger.debug(f"NREM segment length: {random_real_raw.size / FS:.1f} s")
-
     filtered = bandpass_filter(random_real_raw, lowcut=0.1, highcut=100, fs=FS)
     pooled_128 = downsampling(filtered, FS, TARGET_FS)
 
-    r_real, f_real = fit_ar_on_prepared_signal(pooled_128, TARGET_FS, n_jobs=-1, verbose=False)
+    # Note: n_jobs forced to 1 to prevent thread thrashing during parallel execution
+    r_real, f_real = fit_ar_on_prepared_signal(pooled_128, TARGET_FS, n_jobs=1, verbose=False)
     valid_r_real = r_real[~np.isnan(f_real)]
 
     if len(valid_r_real) == 0:
         raise TaskFailure("AR fit on real data returned no valid windows")
 
-    logger.debug(f"Real signal: {len(valid_r_real)} valid AR windows")
-
     surrs = iaaft_surrogates(pooled_128, ns=N_SURROGATES, verbose=False)
     surrogate_valid_r_distributions = []
 
     for i, surrogate in enumerate(surrs):
-        r_surr, f_surr = fit_ar_on_prepared_signal(surrogate, TARGET_FS, n_jobs=-1, verbose=False)
+        r_surr, f_surr = fit_ar_on_prepared_signal(surrogate, TARGET_FS, n_jobs=1, verbose=False)
         valid = r_surr[~np.isnan(f_surr)]
-        logger.debug(f"Surrogate {i + 1}/{N_SURROGATES}: {len(valid)} valid AR windows")
         surrogate_valid_r_distributions.append(valid)
 
     all_surr_r = np.concatenate(surrogate_valid_r_distributions)
@@ -239,6 +232,41 @@ def calculate_optimal_threshold(data_path, scoring_path):
 
 
 # --------------------------------------------------------------------------- #
+# Worker Wrapper for Multiprocessing
+# --------------------------------------------------------------------------- #
+def worker_process(task: Dict) -> Dict:
+    """Wrapper to catch exceptions and return payload back to main thread."""
+    t0 = time.time()
+    try:
+        optimal_thresh = calculate_optimal_threshold(task["data_path"], task["scoring_path"])
+        elapsed = time.time() - t0
+        return {
+            "status": "OK",
+            "task": task,
+            "threshold": float(np.round(optimal_thresh, 3)),
+            "elapsed": elapsed
+        }
+    except TaskFailure as e:
+        elapsed = time.time() - t0
+        return {
+            "status": "SKIP",
+            "task": task,
+            "reason": e.reason,
+            "detail": e.detail,
+            "elapsed": elapsed
+        }
+    except Exception as e:
+        elapsed = time.time() - t0
+        return {
+            "status": "ERROR",
+            "task": task,
+            "reason": "unexpected error",
+            "detail": str(e),
+            "elapsed": elapsed
+        }
+
+
+# --------------------------------------------------------------------------- #
 # Batch processing
 # --------------------------------------------------------------------------- #
 def run_batch_processing(tasks: List[Dict]):
@@ -246,62 +274,69 @@ def run_batch_processing(tasks: List[Dict]):
         logger.error("No valid data files provided. Nothing to do.")
         return
 
-    logger.info(f"Loaded {len(tasks)} file(s) to process.")
+    logger.info(f"Loaded {len(tasks)} file(s) to process. Utilizing {MAX_WORKERS} concurrent workers.")
 
     results = []
     failures = []
     failure_reason_counts = Counter()
 
-    pbar = tqdm(tasks, desc="Processing Files", unit="file", dynamic_ncols=True)
+    pbar = tqdm(total=len(tasks), desc="Processing Files", unit="file", dynamic_ncols=True)
 
-    for i, task in enumerate(pbar, start=1):
-        pbar.set_postfix({
-            "Rat": task["rat"],
-            "Region": task["region"],
-            "Date": task["date"],
-        })
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all tasks to the process pool
+        future_to_task = {executor.submit(worker_process, task): task for task in tasks}
 
-        t0 = time.time()
-        try:
-            optimal_thresh = calculate_optimal_threshold(task["data_path"], task["scoring_path"])
-            elapsed = time.time() - t0
-            results.append({
-                "Cohort": task["cohort"],
+        for i, future in enumerate(as_completed(future_to_task), start=1):
+            res = future.result()
+            task = res["task"]
+            status = res["status"]
+            elapsed = res["elapsed"]
+
+            pbar.set_postfix({
                 "Rat": task["rat"],
                 "Region": task["region"],
                 "Date": task["date"],
-                "File": task["file_name"],
-                "Threshold": float(np.round(optimal_thresh, 3)),
             })
-            logger.debug(
-                f"[OK {i}/{len(tasks)}] {task['rat']}/{task['region']}/{task['date']}/"
-                f"{task['file_name']} -> threshold={optimal_thresh:.3f} ({elapsed:.1f}s)"
-            )
+            pbar.update(1)
 
-        except TaskFailure as e:
-            elapsed = time.time() - t0
-            failure_reason_counts[e.reason] += 1
-            failures.append({**task, "reason": e.reason, "detail": e.detail})
-            logger.warning(
-                f"[SKIP {i}/{len(tasks)}] {task['rat']}/{task['region']}/{task['date']}/"
-                f"{task['file_name']} -> {e.reason}"
-                + (f" ({e.detail})" if e.detail else "")
-                + f" ({elapsed:.1f}s)"
-            )
+            # Centralized logging handling
+            if status == "OK":
+                optimal_thresh = res["threshold"]
+                results.append({
+                    "Cohort": task["cohort"],
+                    "Rat": task["rat"],
+                    "Region": task["region"],
+                    "Date": task["date"],
+                    "File": task["file_name"],
+                    "Threshold": optimal_thresh,
+                })
+                logger.debug(
+                    f"[OK {i}/{len(tasks)}] {task['rat']}/{task['region']}/{task['date']}/"
+                    f"{task['file_name']} -> threshold={optimal_thresh:.3f} ({elapsed:.1f}s)"
+                )
+            elif status == "SKIP":
+                failure_reason_counts[res["reason"]] += 1
+                failures.append({**task, "reason": res["reason"], "detail": res["detail"]})
+                detail_str = f" ({res['detail']})" if res["detail"] else ""
+                logger.warning(
+                    f"[SKIP {i}/{len(tasks)}] {task['rat']}/{task['region']}/{task['date']}/"
+                    f"{task['file_name']} -> {res['reason']}{detail_str} ({elapsed:.1f}s)"
+                )
+            elif status == "ERROR":
+                failure_reason_counts["unexpected error"] += 1
+                failures.append({**task, "reason": res["reason"], "detail": res["detail"]})
+                logger.error(
+                    f"[ERROR {i}/{len(tasks)}] {task['rat']}/{task['region']}/{task['date']}/"
+                    f"{task['file_name']} -> unexpected error: {res['detail']} ({elapsed:.1f}s)"
+                )
 
-        except Exception as e:
-            elapsed = time.time() - t0
-            failure_reason_counts["unexpected error"] += 1
-            failures.append({**task, "reason": "unexpected error", "detail": str(e)})
-            logger.exception(
-                f"[ERROR {i}/{len(tasks)}] {task['rat']}/{task['region']}/{task['date']}/"
-                f"{task['file_name']} -> unexpected error ({elapsed:.1f}s)"
-            )
+            # Checkpoint writing
+            if i % CHECKPOINT_EVERY == 0 or i == len(tasks):
+                if results:
+                    pd.DataFrame(results).to_csv(RAW_CSV, index=False)
+                    logger.debug(f"Checkpoint: saved {len(results)} result(s) to {RAW_CSV}")
 
-        if i % CHECKPOINT_EVERY == 0 or i == len(tasks):
-            if results:
-                pd.DataFrame(results).to_csv(RAW_CSV, index=False)
-                logger.debug(f"Checkpoint: saved {len(results)} result(s) to {RAW_CSV}")
+    pbar.close()
 
     # ----------------------------------------------------------------- #
     # Wrap-up
@@ -345,11 +380,8 @@ def run_batch_processing(tasks: List[Dict]):
 
 
 if __name__ == "__main__":
-    # 1. Initialize the loader with your generated manifest
     loader = TaskLoader("tasks_manifest.csv")
 
-    # 2. Extract the specific subset you want to process.
-    # To run everything, simply use: loader.to_tasks()
     filtered_loader = loader.filter(
         rat=[1, 2],
         region="HPC",
@@ -357,6 +389,4 @@ if __name__ == "__main__":
     )
 
     tasks_to_run = filtered_loader.to_tasks()
-
-    # 3. Pass the resulting task list directly into the processing pipeline
     run_batch_processing(tasks_to_run)
