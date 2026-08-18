@@ -93,7 +93,7 @@ def extract_spindles_for_file(task: Dict, threshold: float) -> pd.DataFrame:
             continue
 
         # Extract using the dynamically loaded threshold
-        spindles = find_spindles_lfp(segment, fs=FS, upper_threshold=threshold)
+        spindles = find_spindles_lfp(segment, fs=FS, upper_threshold=threshold, method="full")
 
         if len(spindles) > 0:
             spindles[:, 0:3] += buf_start / FS  # Adjust time to global recording time

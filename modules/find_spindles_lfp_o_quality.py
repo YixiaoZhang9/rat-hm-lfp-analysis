@@ -257,7 +257,7 @@ def find_spindles_lfp(
     if method not in ("two_pass", "full"):
         raise ValueError(f"method must be 'two_pass' or 'full', got {method!r}")
 
-    lower_threshold = upper_threshold - 0.02
+    lower_threshold = upper_threshold - 0.05
     t_start = time.time()
     logging.info(f"Starting spindle detection (method={method}). "
                  f"Input signal length: {len(raw_signal)}, original fs: {fs}")
