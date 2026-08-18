@@ -27,7 +27,7 @@ SEGMENT_SEC = 10 * 60
 TARGET_PCT_DIFF = 92.0
 
 CHECKPOINT_EVERY = 25          # save partial results to disk every N processed files
-OUTPUT_DIR = Path("outputs")   # where csvs + logs go
+OUTPUT_DIR = Path("results")   # where csvs + logs go
 RAW_CSV = OUTPUT_DIR / "all_thresholds_raw.csv"
 SUMMARY_CSV = OUTPUT_DIR / "summary_thresholds_per_rat_region.csv"
 
