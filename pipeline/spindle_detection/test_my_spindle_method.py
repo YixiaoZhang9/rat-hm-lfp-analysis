@@ -25,7 +25,7 @@ MAX_WORKERS = max(1, os.cpu_count() - 2)
 
 OUTPUT_DIR = Path("results")
 RAW_THRESHOLDS_CSV = OUTPUT_DIR / "all_thresholds_raw.csv"
-SPINDLES_OUT_CSV = OUTPUT_DIR / "summary_thresholds_per_rat_region.csv"
+SPINDLES_OUT_CSV = OUTPUT_DIR / "all_detected_spindles_rat1_hpc.csv"
 
 # --------------------------------------------------------------------------- #
 # Logging Setup
