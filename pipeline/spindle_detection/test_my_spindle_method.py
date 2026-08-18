@@ -161,7 +161,7 @@ def run_extraction(tasks: List[Dict], threshold_map: Dict[str, float]):
     logger.info(f"Loaded {len(tasks)} file(s) for extraction. Utilizing {MAX_WORKERS} concurrent workers.")
 
     all_dfs = []
-    failed_files = []
+    skipped_or_failed_files = []
 
     pbar = tqdm(total=len(tasks), desc="Extracting Spindles", unit="file", dynamic_ncols=True)
 
@@ -170,10 +170,22 @@ def run_extraction(tasks: List[Dict], threshold_map: Dict[str, float]):
         for task in tasks:
             file_name = task["file_name"]
 
-            # Lookup calculated threshold, fallback to 0.75 if something is missing
-            thresh = threshold_map.get(file_name, 0.75)
+            # Use calibrated threshold; skip file if none exists
+            if file_name not in threshold_map:
+                logger.warning(
+                    f"[SKIP] {file_name} -> no calibrated threshold found"
+                )
+                skipped_or_failed_files.append(file_name)
+                pbar.update(1)
+                continue
 
-            future = executor.submit(worker_process, task, thresh)
+            thresh = threshold_map[file_name]
+
+            future = executor.submit(
+                worker_process,
+                task,
+                thresh
+            )
             future_to_task[future] = task
 
         for future in as_completed(future_to_task):
@@ -191,7 +203,7 @@ def run_extraction(tasks: List[Dict], threshold_map: Dict[str, float]):
                 logger.debug(f"[OK] {task['file_name']} -> found {len(df)} spindles ({res['elapsed']:.1f}s)")
             else:
                 logger.error(f"[ERROR] {task['file_name']} -> {res['reason']} ({res['elapsed']:.1f}s)")
-                failed_files.append(task["file_name"])
+                skipped_or_failed_files.append(task["file_name"])
 
     pbar.close()
 
@@ -203,8 +215,10 @@ def run_extraction(tasks: List[Dict], threshold_map: Dict[str, float]):
     else:
         logger.warning("Extraction complete, but zero spindles were found across all files.")
 
-    if failed_files:
-        logger.warning(f"Failed to process {len(failed_files)} files. Check log for details.")
+    if skipped_or_failed_files:
+        logger.warning(
+            f"{len(skipped_or_failed_files)} files were skipped or failed. Check log for details."
+        )
 
 
 if __name__ == "__main__":
