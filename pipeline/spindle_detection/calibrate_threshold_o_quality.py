@@ -6,7 +6,6 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -32,8 +31,6 @@ MAX_WORKERS = max(1, os.cpu_count() - 2)  # Leave a couple of cores free for the
 
 CHECKPOINT_EVERY = 25          # save partial results to disk every N processed files
 OUTPUT_DIR = Path("results")   # where csvs + logs go
-RAW_CSV = OUTPUT_DIR / "all_thresholds_raw.csv"
-SUMMARY_CSV = OUTPUT_DIR / "summary_thresholds_per_rat_region.csv"
 
 # --------------------------------------------------------------------------- #
 # Logging setup: console (INFO+) and a full-detail run log file (DEBUG+)
@@ -134,7 +131,7 @@ def calculate_optimal_threshold(data_path, scoring_path):
     surrs = iaaft_surrogates(pooled_128, ns=N_SURROGATES, verbose=False)
     surrogate_valid_r_distributions = []
 
-    for i, surrogate in enumerate(surrs):
+    for surrogate in surrs:
         r_surr, f_surr = fit_ar_on_prepared_signal(surrogate, TARGET_FS, n_jobs=1, verbose=False)
         valid = r_surr[~np.isnan(f_surr)]
         surrogate_valid_r_distributions.append(valid)
@@ -143,7 +140,7 @@ def calculate_optimal_threshold(data_path, scoring_path):
     if all_surr_r.size == 0:
         raise TaskFailure("AR fit on all surrogates returned no valid windows")
 
-    thresholds = np.arange(0.70, 0.90, 0.01)
+    thresholds = np.arange(0.5, 0.8, 0.02)
     best_threshold = None
     closest_diff = float("inf")
 
@@ -166,7 +163,7 @@ def calculate_optimal_threshold(data_path, scoring_path):
 # --------------------------------------------------------------------------- #
 # Worker Wrapper for Multiprocessing
 # --------------------------------------------------------------------------- #
-def worker_process(task: Dict) -> Dict:
+def worker_process(task: dict) -> dict:
     """Wrapper to catch exceptions and return payload back to main thread."""
     t0 = time.time()
     try:
@@ -201,7 +198,7 @@ def worker_process(task: Dict) -> Dict:
 # --------------------------------------------------------------------------- #
 # Batch processing
 # --------------------------------------------------------------------------- #
-def run_batch_processing(tasks: List[Dict]):
+def run_batch_processing(tasks: list[dict]):
     if not tasks:
         logger.error("No valid data files provided. Nothing to do.")
         return
@@ -262,11 +259,14 @@ def run_batch_processing(tasks: List[Dict]):
                     f"{task['file_name']} -> unexpected error: {res['detail']} ({elapsed:.1f}s)"
                 )
 
-            # Checkpoint writing
+            # Checkpoint writing (grouped by Rat and Region)
             if i % CHECKPOINT_EVERY == 0 or i == len(tasks):
                 if results:
-                    pd.DataFrame(results).to_csv(RAW_CSV, index=False)
-                    logger.debug(f"Checkpoint: saved {len(results)} result(s) to {RAW_CSV}")
+                    df_tmp = pd.DataFrame(results)
+                    for (rat, region), group in df_tmp.groupby(["Rat", "Region"]):
+                        out_path = OUTPUT_DIR / f"thresholds_raw_Rat{rat}_{region}.csv"
+                        group.to_csv(out_path, index=False)
+                    logger.debug(f"Checkpoint: saved {len(results)} result(s) across rat/region files")
 
     pbar.close()
 
@@ -291,10 +291,14 @@ def run_batch_processing(tasks: List[Dict]):
         logger.error("No thresholds calculated successfully. Check 'failed_files.csv' and the debug log.")
         return
 
+    # Final Raw Save
     df = pd.DataFrame(results)
-    df.to_csv(RAW_CSV, index=False)
-    logger.info(f"Saved raw thresholds to '{RAW_CSV}'")
+    for (rat, region), group in df.groupby(["Rat", "Region"]):
+        out_path = OUTPUT_DIR / f"thresholds_raw_Rat{rat}_{region}.csv"
+        group.to_csv(out_path, index=False)
+    logger.info(f"Saved raw thresholds to individual rat/region CSVs in '{OUTPUT_DIR}'")
 
+    # Final Summary Save
     summary = df.groupby(["Rat", "Region"])["Threshold"].agg(
         Average="mean",
         Min="min",
@@ -304,8 +308,11 @@ def run_batch_processing(tasks: List[Dict]):
     ).reset_index()
 
     summary["Average"] = summary["Average"].round(3)
-    summary.to_csv(SUMMARY_CSV, index=False)
-    logger.info(f"Saved summary to '{SUMMARY_CSV}'")
+
+    for (rat, region), group in summary.groupby(["Rat", "Region"]):
+        sum_path = OUTPUT_DIR / f"summary_thresholds_Rat{rat}_{region}.csv"
+        group.to_csv(sum_path, index=False)
+    logger.info(f"Saved summary thresholds to individual rat/region CSVs in '{OUTPUT_DIR}'")
 
     print("\n--- Final Threshold Summary ---")
     print(summary.to_string())
@@ -314,11 +321,11 @@ def run_batch_processing(tasks: List[Dict]):
 if __name__ == "__main__":
     loader = TaskLoader("tasks_manifest.csv")
 
-    filtered_loader = loader.filter(
-        rat=[1, 2],
-        region="HPC",
-        cohort="R1-4"
-    )
+    # filtered_loader = loader.filter(
+    #     rat=[1, 2],
+    #     region="HPC",
+    #     cohort="R1-4"
+    # )
 
-    tasks_to_run = filtered_loader.to_tasks()
+    tasks_to_run = loader.to_tasks()
     run_batch_processing(tasks_to_run)
