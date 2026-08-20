@@ -140,7 +140,7 @@ def calculate_optimal_threshold(data_path, scoring_path):
     if all_surr_r.size == 0:
         raise TaskFailure("AR fit on all surrogates returned no valid windows")
 
-    thresholds = np.arange(1, 0.5, -0.01)
+    thresholds = np.arange(0.99, 0.50, -0.01)
     best_threshold = None
     closest_diff = float("inf")
 
