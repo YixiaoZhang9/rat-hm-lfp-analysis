@@ -21,11 +21,26 @@ from task_loader import TaskLoader
 # --------------------------------------------------------------------------- #
 FS = 1000
 BUFFER_SEC = 2.0
-GLOBAL_THRESHOLD = 0.73
+GLOBAL_THRESHOLD = 0.73  # from calibrate_threshold.py grand median across rats/regions
+
+# "two_pass" does a coarse scan then refines only flagged regions -- this is the
+# practical choice for a full-dataset run. "full" fits AR at every sample shift
+# across the whole segment (what calibrate_threshold.py used on 5-min segments) --
+# only use "full" if you have the compute budget and need maximal fidelity.
+DETECTION_METHOD = "full"
+
+# Each call to find_spindles_lfp does its own internal joblib parallelism across
+# windows. We're already parallelizing across FILES via ProcessPoolExecutor below,
+# so the inner call must be n_jobs=1 -- otherwise every outer worker also tries to
+# spawn its own full set of subprocesses (oversubscription / thrashing).
+INNER_N_JOBS = 1
+
 MAX_WORKERS = max(1, os.cpu_count() - 2)
+CHECKPOINT_EVERY = 25  # save partial results to disk every N processed files
 
 OUTPUT_DIR = Path("results")
-SPINDLES_OUT_CSV = OUTPUT_DIR / "all_detected_spindles_global_0.73.csv"
+SPINDLES_OUT_CSV = OUTPUT_DIR / f"all_detected_spindles_global_{GLOBAL_THRESHOLD}.csv"
+FAILED_OUT_CSV = OUTPUT_DIR / "extraction_failed_files.csv"
 
 # --------------------------------------------------------------------------- #
 # Logging Setup
@@ -51,6 +66,19 @@ file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(mes
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
+logger.info(f"Full debug log for this run: {log_path.resolve()}")
+if SPINDLES_OUT_CSV.exists():
+    logger.warning(f"Output file already exists and will be OVERWRITTEN at the end of this run: {SPINDLES_OUT_CSV}")
+
+
+class TaskFailure(Exception):
+    """Raised with a short, categorical reason so failures can be tallied."""
+    def __init__(self, reason: str, detail: str = ""):
+        self.reason = reason
+        self.detail = detail
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+
+
 # --------------------------------------------------------------------------- #
 # Core Detection Logic
 # --------------------------------------------------------------------------- #
@@ -70,19 +98,26 @@ def extract_spindles_for_file(task: Dict, threshold: float) -> pd.DataFrame:
     scoring_path = task["scoring_path"]
 
     if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Data file not found: {data_path}")
+        raise TaskFailure("data file not found", data_path)
     if not os.path.exists(scoring_path):
-        raise FileNotFoundError(f"Scoring file not found: {scoring_path}")
+        raise TaskFailure("scoring file not found", scoring_path)
 
-    raw_signal = loadmat(data_path)["data"].squeeze()
-    nrem_intervals = get_nrem_intervals(scoring_path)
+    try:
+        raw_signal = loadmat(data_path)["data"].squeeze()
+    except Exception as e:
+        raise TaskFailure("data .mat read error", str(e))
 
-    if len(nrem_intervals) == 0:
-        return pd.DataFrame()
+    try:
+        nrem_intervals = get_nrem_intervals(scoring_path)
+    except Exception as e:
+        raise TaskFailure("scoring .mat read error", str(e))
+
+    if nrem_intervals.shape[0] == 0:
+        raise TaskFailure("no NREM epochs in scoring file")
 
     all_spindles = []
+    n_blocks_too_short = 0
 
-    # Process each NREM block with buffer
     for start, end in nrem_intervals:
         buf_start = max(0, int((start - BUFFER_SEC) * FS))
         buf_end = min(len(raw_signal), int((end + BUFFER_SEC) * FS))
@@ -90,13 +125,19 @@ def extract_spindles_for_file(task: Dict, threshold: float) -> pd.DataFrame:
         segment = raw_signal[buf_start:buf_end]
 
         if len(segment) < 2 * BUFFER_SEC * FS:
+            n_blocks_too_short += 1
             continue
 
-        # Extract using the global threshold
-        spindles = find_spindles_lfp(segment, fs=FS, upper_threshold=threshold, method="full")
+        spindles = find_spindles_lfp(
+            segment,
+            fs=FS,
+            upper_threshold=threshold,
+            method=DETECTION_METHOD,
+            n_jobs=INNER_N_JOBS,
+        )
 
         if len(spindles) > 0:
-            spindles[:, 0:3] += buf_start / FS  # Adjust time to global recording time
+            spindles[:, 0:3] += buf_start / FS  # local segment time -> global recording time
 
             # Keep only spindles strictly within the original NREM block (ignoring buffer)
             keep_mask = (spindles[:, 0] >= start) & (spindles[:, 2] <= end)
@@ -105,25 +146,28 @@ def extract_spindles_for_file(task: Dict, threshold: float) -> pd.DataFrame:
             if len(valid_spindles) > 0:
                 all_spindles.append(valid_spindles)
 
-    if all_spindles:
-        final_spindles = np.vstack(all_spindles)
-
-        # Structure the results
-        df = pd.DataFrame(
-            final_spindles,
-            columns=["Start_s", "Peak_s", "End_s", "Duration_s", "Max_R", "Peak_Freq_Hz"]
+    if n_blocks_too_short > 0:
+        logger.debug(
+            f"{task['file_name']}: skipped {n_blocks_too_short}/{len(nrem_intervals)} "
+            f"NREM block(s) shorter than 2x buffer ({2 * BUFFER_SEC}s)"
         )
-        # Append metadata
-        df.insert(0, "File", task["file_name"])
-        df.insert(0, "Date", task["date"])
-        df.insert(0, "Region", task["region"])
-        df.insert(0, "Rat", task["rat"])
-        df.insert(0, "Cohort", task["cohort"])
-        df["Threshold_Used"] = threshold
 
-        return df
-    else:
+    if not all_spindles:
         return pd.DataFrame()
+
+    final_spindles = np.vstack(all_spindles)
+    df = pd.DataFrame(
+        final_spindles,
+        columns=["Start_s", "Peak_s", "End_s", "Duration_s", "Max_R", "Peak_Freq_Hz"]
+    )
+    df.insert(0, "File", task["file_name"])
+    df.insert(0, "Date", task["date"])
+    df.insert(0, "Region", task["region"])
+    df.insert(0, "Rat", task["rat"])
+    df.insert(0, "Cohort", task["cohort"])
+    df["Threshold_Used"] = threshold
+
+    return df
 
 
 # --------------------------------------------------------------------------- #
@@ -138,15 +182,25 @@ def worker_process(task: Dict, threshold: float) -> Dict:
             "status": "OK",
             "task": task,
             "df": df_spindles,
-            "elapsed": elapsed
+            "elapsed": elapsed,
+        }
+    except TaskFailure as e:
+        elapsed = time.time() - t0
+        return {
+            "status": "SKIP",
+            "task": task,
+            "reason": e.reason,
+            "detail": e.detail,
+            "elapsed": elapsed,
         }
     except Exception as e:
         elapsed = time.time() - t0
         return {
             "status": "ERROR",
             "task": task,
-            "reason": str(e),
-            "elapsed": elapsed
+            "reason": "unexpected error",
+            "detail": str(e),
+            "elapsed": elapsed,
         }
 
 
@@ -158,60 +212,89 @@ def run_extraction(tasks: List[Dict], threshold: float):
         logger.error("No valid data files provided. Nothing to do.")
         return
 
-    logger.info(f"Loaded {len(tasks)} file(s) for extraction. Utilizing {MAX_WORKERS} concurrent workers.")
+    logger.info(
+        f"Loaded {len(tasks)} file(s) for extraction. Utilizing {MAX_WORKERS} concurrent "
+        f"workers, method='{DETECTION_METHOD}', threshold={threshold}."
+    )
 
     all_dfs = []
-    skipped_or_failed_files = []
+    failures = []
+    failure_reason_counts = {}
 
     pbar = tqdm(total=len(tasks), desc="Extracting Spindles", unit="file", dynamic_ncols=True)
 
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_task = {}
-        for task in tasks:
-            future = executor.submit(
-                worker_process,
-                task,
-                threshold
-            )
-            future_to_task[future] = task
+        future_to_task = {
+            executor.submit(worker_process, task, threshold): task for task in tasks
+        }
 
-        for future in as_completed(future_to_task):
+        for i, future in enumerate(as_completed(future_to_task), start=1):
             res = future.result()
             task = res["task"]
             status = res["status"]
+            elapsed = res["elapsed"]
 
-            pbar.set_postfix({"File": task["file_name"], "Status": status})
+            pbar.set_postfix({"Rat": task["rat"], "Region": task["region"], "Status": status})
             pbar.update(1)
 
             if status == "OK":
                 df = res["df"]
                 if not df.empty:
                     all_dfs.append(df)
-                logger.debug(f"[OK] {task['file_name']} -> found {len(df)} spindles ({res['elapsed']:.1f}s)")
+                logger.debug(f"[OK {i}/{len(tasks)}] {task['file_name']} -> {len(df)} spindles ({elapsed:.1f}s)")
+            elif status == "SKIP":
+                failure_reason_counts[res["reason"]] = failure_reason_counts.get(res["reason"], 0) + 1
+                failures.append({**task, "reason": res["reason"], "detail": res["detail"]})
+                logger.warning(f"[SKIP {i}/{len(tasks)}] {task['file_name']} -> {res['reason']} ({elapsed:.1f}s)")
             else:
-                logger.error(f"[ERROR] {task['file_name']} -> {res['reason']} ({res['elapsed']:.1f}s)")
-                skipped_or_failed_files.append(task["file_name"])
+                failure_reason_counts["unexpected error"] = failure_reason_counts.get("unexpected error", 0) + 1
+                failures.append({**task, "reason": res["reason"], "detail": res["detail"]})
+                logger.error(f"[ERROR {i}/{len(tasks)}] {task['file_name']} -> {res['detail']} ({elapsed:.1f}s)")
+
+            # Checkpoint
+            if i % CHECKPOINT_EVERY == 0 or i == len(tasks):
+                if all_dfs:
+                    pd.concat(all_dfs, ignore_index=True).to_csv(SPINDLES_OUT_CSV, index=False)
+                    logger.debug(f"Checkpoint: saved spindles from {len(all_dfs)} file(s) so far")
+                if failures:
+                    pd.DataFrame(failures).to_csv(FAILED_OUT_CSV, index=False)
 
     pbar.close()
 
-    # Wrap-up and compile CSV
-    if all_dfs:
-        master_df = pd.concat(all_dfs, ignore_index=True)
-        master_df.to_csv(SPINDLES_OUT_CSV, index=False)
-        logger.info(f"Extraction complete! Saved {len(master_df)} total spindles to '{SPINDLES_OUT_CSV}'.")
-    else:
-        logger.warning("Extraction complete, but zero spindles were found across all files.")
+    # --------------------------------------------------------------------- #
+    # Wrap-up
+    # --------------------------------------------------------------------- #
+    n_ok = len(tasks) - len(failures)
+    logger.info(f"Done: {n_ok} succeeded, {len(failures)} failed/skipped out of {len(tasks)} total.")
 
-    if skipped_or_failed_files:
-        logger.warning(
-            f"{len(skipped_or_failed_files)} files were skipped or failed. Check log for details."
+    if failure_reason_counts:
+        logger.info(
+            "Failure/skip reasons: "
+            + ", ".join(f"{reason}={count}" for reason, count in failure_reason_counts.items())
         )
+    if failures:
+        pd.DataFrame(failures).to_csv(FAILED_OUT_CSV, index=False)
+        logger.info(f"Saved failure details to '{FAILED_OUT_CSV}'")
+
+    if not all_dfs:
+        logger.warning("Extraction complete, but zero spindles were found across all files.")
+        return
+
+    master_df = pd.concat(all_dfs, ignore_index=True)
+    master_df.to_csv(SPINDLES_OUT_CSV, index=False)
+    logger.info(f"Saved {len(master_df)} total spindles from {len(all_dfs)} file(s) to '{SPINDLES_OUT_CSV}'.")
+
+    # Quick summary so you don't have to reload the CSV to sanity-check the run
+    per_file_counts = master_df.groupby(["Rat", "Region", "File"]).size()
+    logger.info(
+        f"Spindles per file -- mean: {per_file_counts.mean():.1f}, "
+        f"median: {per_file_counts.median():.1f}, "
+        f"min: {per_file_counts.min()}, max: {per_file_counts.max()}"
+    )
+    logger.info(f"Mean spindle duration: {master_df['Duration_s'].mean():.2f}s")
 
 
 if __name__ == "__main__":
-    # 1. Use TaskLoader to load the entire target dataset
     loader = TaskLoader("/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/tasks_manifest.csv")
     tasks_to_run = loader.to_tasks()
-
-    # 2. Execute detection with the global threshold
     run_extraction(tasks_to_run, GLOBAL_THRESHOLD)
