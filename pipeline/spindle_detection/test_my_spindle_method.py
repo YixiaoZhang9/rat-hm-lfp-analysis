@@ -21,11 +21,11 @@ from task_loader import TaskLoader
 # --------------------------------------------------------------------------- #
 FS = 1000
 BUFFER_SEC = 2.0
+GLOBAL_THRESHOLD = 0.73
 MAX_WORKERS = max(1, os.cpu_count() - 2)
 
 OUTPUT_DIR = Path("results")
-RAW_THRESHOLDS_CSV = OUTPUT_DIR / "all_thresholds_raw.csv"
-SPINDLES_OUT_CSV = OUTPUT_DIR / "all_detected_spindles_rat1_hpc.csv"
+SPINDLES_OUT_CSV = OUTPUT_DIR / "all_detected_spindles_global_0.73.csv"
 
 # --------------------------------------------------------------------------- #
 # Logging Setup
@@ -92,7 +92,7 @@ def extract_spindles_for_file(task: Dict, threshold: float) -> pd.DataFrame:
         if len(segment) < 2 * BUFFER_SEC * FS:
             continue
 
-        # Extract using the dynamically loaded threshold
+        # Extract using the global threshold
         spindles = find_spindles_lfp(segment, fs=FS, upper_threshold=threshold, method="full")
 
         if len(spindles) > 0:
@@ -153,7 +153,7 @@ def worker_process(task: Dict, threshold: float) -> Dict:
 # --------------------------------------------------------------------------- #
 # Main Execution
 # --------------------------------------------------------------------------- #
-def run_extraction(tasks: List[Dict], threshold_map: Dict[str, float]):
+def run_extraction(tasks: List[Dict], threshold: float):
     if not tasks:
         logger.error("No valid data files provided. Nothing to do.")
         return
@@ -168,23 +168,10 @@ def run_extraction(tasks: List[Dict], threshold_map: Dict[str, float]):
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_task = {}
         for task in tasks:
-            file_name = task["file_name"]
-
-            # Use calibrated threshold; skip file if none exists
-            if file_name not in threshold_map:
-                logger.warning(
-                    f"[SKIP] {file_name} -> no calibrated threshold found"
-                )
-                skipped_or_failed_files.append(file_name)
-                pbar.update(1)
-                continue
-
-            thresh = threshold_map[file_name]
-
             future = executor.submit(
                 worker_process,
                 task,
-                thresh
+                threshold
             )
             future_to_task[future] = task
 
@@ -222,18 +209,9 @@ def run_extraction(tasks: List[Dict], threshold_map: Dict[str, float]):
 
 
 if __name__ == "__main__":
-    # 1. Load the pre-calculated thresholds into a lookup dictionary
-    if not RAW_THRESHOLDS_CSV.exists():
-        logger.error(f"Threshold CSV not found at {RAW_THRESHOLDS_CSV}. Run calibration first.")
-        sys.exit(1)
-
-    threshold_df = pd.read_csv(RAW_THRESHOLDS_CSV)
-    threshold_map = dict(zip(threshold_df["File"], threshold_df["Threshold"]))
-
-    # 2. Use TaskLoader to filter out the target dataset
+    # 1. Use TaskLoader to load the entire target dataset
     loader = TaskLoader("/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/tasks_manifest.csv")
-    filtered_loader = loader.filter(rat=1, region="HPC")
-    tasks_to_run = filtered_loader.to_tasks()
+    tasks_to_run = loader.to_tasks()
 
-    # 3. Execute detection
-    run_extraction(tasks_to_run, threshold_map)
+    # 2. Execute detection with the global threshold
+    run_extraction(tasks_to_run, GLOBAL_THRESHOLD)
