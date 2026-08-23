@@ -36,7 +36,7 @@ DETECTION_METHOD = "full"
 INNER_N_JOBS = 1
 
 MAX_WORKERS = max(1, os.cpu_count() - 2)
-CHECKPOINT_EVERY = 25  # save partial results to disk every N processed files
+CHECKPOINT_EVERY = 25
 
 OUTPUT_DIR = Path("results")
 SPINDLES_OUT_CSV = OUTPUT_DIR / f"all_detected_spindles_global_{GLOBAL_THRESHOLD}.csv"
