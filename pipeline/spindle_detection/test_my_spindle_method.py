@@ -39,7 +39,7 @@ MAX_WORKERS = max(1, os.cpu_count() - 2)
 CHECKPOINT_EVERY = 25
 
 OUTPUT_DIR = Path("results")
-SPINDLES_OUT_CSV = OUTPUT_DIR / f"all_detected_spindles_global_{GLOBAL_THRESHOLD}.csv"
+SPINDLES_OUT_CSV = OUTPUT_DIR / "all_detected_spindles_global_{}.csv".format(GLOBAL_THRESHOLD)
 FAILED_OUT_CSV = OUTPUT_DIR / "extraction_failed_files.csv"
 
 # --------------------------------------------------------------------------- #
@@ -49,7 +49,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = OUTPUT_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_path = LOG_DIR / f"extract_spindles_{run_stamp}.log"
+log_path = LOG_DIR / "extract_spindles_{}.log".format(run_stamp)
 
 logger = logging.getLogger("extract_spindles")
 logger.setLevel(logging.DEBUG)
