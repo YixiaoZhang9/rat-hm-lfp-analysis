@@ -1,6 +1,7 @@
 import csv
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -10,9 +11,20 @@ from modules.project_config import get_path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+# Trial number at the end of the data filename, e.g. "chan51_7.mat" -> "7"
+DATA_TRIAL_RE = re.compile(r"_(\d+)\.mat$")
+
+# Trial number embedded in the scoring filename, e.g.
+# "Rat_HM_Ephys_TD_Rat6_20221118_postsleep_07_FR-eegstates.mat" -> "07"
+SCORING_TRIAL_RE = re.compile(r"_(\d+)_[A-Za-z]+-eegstates\.mat$")
+
+
 def build_manifest(root_dirs, output_csv="tasks_manifest.csv"):
     manifest_records = []
     skipped_scoring_missing = 0
+    skipped_unparseable_data = 0
+    skipped_trial_no_match = 0
+    ambiguous_matches = 0
 
     for root in root_dirs:
         root_path = Path(root)
@@ -32,22 +44,53 @@ def build_manifest(root_dirs, output_csv="tasks_manifest.csv"):
             cohort_dir = data_path.parents[5]
             cohort = cohort_dir.name
 
+            # --- Extract trial number from the data filename ---
+            data_match = DATA_TRIAL_RE.search(data_path.name)
+            if not data_match:
+                skipped_unparseable_data += 1
+                logging.warning(f"Could not parse trial number from data file: {data_path}")
+                continue
+            data_trial = data_match.group(1)
+
+            # --- Find all scoring files for this rat/date, any scorer suffix ---
             scoring_date_dir = cohort_dir / "Scoring" / rat / date / "postsleep"
+            all_scoring_files = list(scoring_date_dir.glob("*-eegstates.mat"))
 
-            # Find the SW-eegstates.mat file
-            scoring_files = list(scoring_date_dir.glob("*SW-eegstates.mat"))
-
-            if not scoring_files:
+            if not all_scoring_files:
                 skipped_scoring_missing += 1
+                logging.warning(f"No scoring files found in: {scoring_date_dir}")
                 continue
 
-            scoring_path = scoring_files[0]
+            # --- Match by trial number (zero-padding-insensitive) ---
+            matches = []
+            for f in all_scoring_files:
+                m = SCORING_TRIAL_RE.search(f.name)
+                if m and m.group(1).lstrip("0") == data_trial.lstrip("0"):
+                    matches.append(f)
+
+            if not matches:
+                skipped_trial_no_match += 1
+                logging.warning(
+                    f"No scoring file matching trial '{data_trial}' for {data_path} "
+                    f"(candidates in folder: {[f.name for f in all_scoring_files]})"
+                )
+                continue
+
+            if len(matches) > 1:
+                ambiguous_matches += 1
+                logging.warning(
+                    f"Multiple scoring files matched trial '{data_trial}' for {data_path}: "
+                    f"{[f.name for f in matches]} -> using {matches[0].name}"
+                )
+
+            scoring_path = matches[0]
 
             manifest_records.append({
                 "cohort": cohort,
                 "rat": rat,
                 "region": region,
                 "date": date,
+                "trial": data_trial,
                 "data_path": str(data_path.resolve()),
                 "scoring_path": str(scoring_path.resolve())
             })
@@ -63,8 +106,16 @@ def build_manifest(root_dirs, output_csv="tasks_manifest.csv"):
     else:
         logging.warning("No valid pairs found. Manifest not created.")
 
-    if skipped_scoring_missing:
-        logging.info(f"Skipped {skipped_scoring_missing} data files due to missing scoring files.")
+    logging.info(
+        "Summary -- matched: %d, no scoring files in folder: %d, unparseable data filename: %d, "
+        "no trial match: %d, ambiguous (multiple) matches: %d",
+        len(manifest_records),
+        skipped_scoring_missing,
+        skipped_unparseable_data,
+        skipped_trial_no_match,
+        ambiguous_matches,
+    )
+
 
 if __name__ == "__main__":
     r1_8_root = get_path("R1_8_root")
