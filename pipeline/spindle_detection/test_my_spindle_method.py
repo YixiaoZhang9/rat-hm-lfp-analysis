@@ -229,13 +229,13 @@ def run_extraction(tasks: List[Dict]):
 
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_task = {
-            executor.submit(worker_process, task, REGION_THRESHOLDS[task["Region"]]): task for task in tasks
+            executor.submit(worker_process, task, REGION_THRESHOLDS[task["region"]]): task for task in tasks
         }
 
         for i, future in enumerate(as_completed(future_to_task), start=1):
             res = future.result()
             task = res["task"]
-            threshold = REGION_THRESHOLDS[task["Region"]]
+            threshold = REGION_THRESHOLDS[task["region"]]
             status = res["status"]
             elapsed = res["elapsed"]
 
