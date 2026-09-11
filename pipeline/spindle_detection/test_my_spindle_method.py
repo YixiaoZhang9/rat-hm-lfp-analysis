@@ -21,7 +21,11 @@ from task_loader import TaskLoader
 # --------------------------------------------------------------------------- #
 FS = 1000
 BUFFER_SEC = 2.0
-GLOBAL_THRESHOLD = 0.73  # from calibrate_threshold.py grand median across rats/regions
+REGION_THRESHOLDS = {
+    "HPC": 0.91,
+    "PL": 0.89,
+    "RSC": 0.92,
+}
 
 # "two_pass" does a coarse scan then refines only flagged regions -- this is the
 # practical choice for a full-dataset run. "full" fits AR at every sample shift
@@ -39,7 +43,7 @@ MAX_WORKERS = max(1, os.cpu_count() - 2)
 CHECKPOINT_EVERY = 25
 
 OUTPUT_DIR = Path("results")
-SPINDLES_OUT_CSV = OUTPUT_DIR / "all_detected_spindles_global_{}.csv".format(GLOBAL_THRESHOLD)
+SPINDLES_OUT_CSV = OUTPUT_DIR / "all_detected_spindles_per_region.csv"
 FAILED_OUT_CSV = OUTPUT_DIR / "extraction_failed_files.csv"
 
 # --------------------------------------------------------------------------- #
@@ -207,14 +211,14 @@ def worker_process(task: Dict, threshold: float) -> Dict:
 # --------------------------------------------------------------------------- #
 # Main Execution
 # --------------------------------------------------------------------------- #
-def run_extraction(tasks: List[Dict], threshold: float):
+def run_extraction(tasks: List[Dict]):
     if not tasks:
         logger.error("No valid data files provided. Nothing to do.")
         return
 
     logger.info(
         f"Loaded {len(tasks)} file(s) for extraction. Utilizing {MAX_WORKERS} concurrent "
-        f"workers, method='{DETECTION_METHOD}', threshold={threshold}."
+        f"workers, method='{DETECTION_METHOD}', thresholds={REGION_THRESHOLDS}."
     )
 
     all_dfs = []
@@ -225,12 +229,13 @@ def run_extraction(tasks: List[Dict], threshold: float):
 
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_task = {
-            executor.submit(worker_process, task, threshold): task for task in tasks
+            executor.submit(worker_process, task, REGION_THRESHOLDS[task["Region"]]): task for task in tasks
         }
 
         for i, future in enumerate(as_completed(future_to_task), start=1):
             res = future.result()
             task = res["task"]
+            threshold = REGION_THRESHOLDS[task["Region"]]
             status = res["status"]
             elapsed = res["elapsed"]
 
@@ -241,7 +246,7 @@ def run_extraction(tasks: List[Dict], threshold: float):
                 df = res["df"]
                 if not df.empty:
                     all_dfs.append(df)
-                logger.debug(f"[OK {i}/{len(tasks)}] {task['file_name']} -> {len(df)} spindles ({elapsed:.1f}s)")
+                logger.debug(f"[OK {i}/{len(tasks)}] {task['file_name']} with threshold: {threshold} -> {len(df)} spindles ({elapsed:.1f}s)")
             elif status == "SKIP":
                 failure_reason_counts[res["reason"]] = failure_reason_counts.get(res["reason"], 0) + 1
                 failures.append({**task, "reason": res["reason"], "detail": res["detail"]})
@@ -297,4 +302,4 @@ def run_extraction(tasks: List[Dict], threshold: float):
 if __name__ == "__main__":
     loader = TaskLoader("/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/tasks_manifest.csv")
     tasks_to_run = loader.to_tasks()
-    run_extraction(tasks_to_run, GLOBAL_THRESHOLD)
+    run_extraction(tasks_to_run)
