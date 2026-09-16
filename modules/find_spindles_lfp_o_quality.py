@@ -88,67 +88,6 @@ def fit_ar_on_prepared_signal(
     )
 
 
-def fit_ar_two_pass(
-    signal, target_fs=128, ar_order=8, window_sec=1.0,
-    spindle_band=(10, 15), ra=0.70, fine_step_frac=1 / 16,
-    n_jobs=-1, verbose=True,
-):
-    window_samples = int(window_sec * target_fs)
-    fine_step = max(1, int(round(window_samples * fine_step_frac)))
-
-    if len(signal) < window_samples:
-        return []
-
-    n_coarse = (len(signal) - window_samples) // window_samples + 1
-    coarse_starts = np.arange(n_coarse) * window_samples
-    r_coarse, _ = _fit_windows_at_starts(
-        signal, coarse_starts, window_samples, ar_order, target_fs, spindle_band,
-        n_jobs, verbose, desc="Coarse AR scan"
-    )
-
-    flagged = np.zeros(n_coarse, dtype=bool)
-    hits = np.where(r_coarse >= ra)[0]
-    flagged[hits] = True
-    flagged[np.clip(hits - 1, 0, n_coarse - 1)] = True
-    flagged[np.clip(hits + 1, 0, n_coarse - 1)] = True
-
-    if not flagged.any():
-        return []
-
-    regions = []
-    i = 0
-    while i < n_coarse:
-        if flagged[i]:
-            j = i
-            while j + 1 < n_coarse and flagged[j + 1]:
-                j += 1
-            region_start = coarse_starts[i]
-            region_end = min(coarse_starts[j] + window_samples, len(signal))
-            regions.append((region_start, region_end))
-            i = j + 1
-        else:
-            i += 1
-
-    fine_regions = []
-    for region_start, region_end in regions:
-        last_valid_start = region_end - window_samples
-        if last_valid_start < region_start:
-            continue
-        fine_starts = np.arange(region_start, last_valid_start + 1, fine_step)
-        r_fine, f_fine = _fit_windows_at_starts(
-            signal, fine_starts, window_samples, ar_order, target_fs, spindle_band,
-            n_jobs, verbose=False, desc="Fine AR scan"
-        )
-        fine_regions.append({
-            "start_sample": region_start,
-            "r": r_fine,
-            "f": f_fine,
-            "sample_starts": fine_starts,
-        })
-
-    return fine_regions
-
-
 def _detect_events_in_region(r, f, sample_starts, target_fs, window_samples, upper_threshold, lower_threshold):
     """Detect event intervals using hysteresis thresholding."""
     events = []
@@ -189,7 +128,7 @@ def _finalize_event(events, r, f, sample_starts, target_fs, window_samples, star
     events.append([start_time, peak_time, end_time, duration, max_r, peak_frequency])
 
 
-def merge_overlapping_events(events_list, min_gap_sec=0.25):
+def merge_overlapping_events(events_list, min_gap_sec=0.5):
     """
     Merge overlapping or closely consecutive detected intervals.
 
@@ -244,44 +183,29 @@ def merge_overlapping_events(events_list, min_gap_sec=0.25):
 
 def find_spindles_lfp(
     raw_signal, fs, target_fs=128, ar_order=8, window_sec=1.0,
-    upper_threshold=0.75, spindle_band=(10, 15), min_gap_sec=0.25,
-    n_jobs=-1, method="two_pass",
+    upper_threshold=0.75, spindle_band=(10, 15), min_gap_sec=0.5,
+    n_jobs=-1,
 ):
-    if method not in ("two_pass", "full"):
-        raise ValueError(f"method must be 'two_pass' or 'full', got {method!r}")
-
     lower_threshold = upper_threshold - 0.02
     t_start = time.time()
-    logging.info(f"Starting spindle detection (method={method}). Input signal length: {len(raw_signal)}")
+    logging.info(f"Starting spindle detection, Input signal length: {len(raw_signal)}")
 
     filtered_signal = bandpass_filter(raw_signal, lowcut=0.1, highcut=100, fs=fs)
     signal = downsampling(filtered_signal, fs, target_fs)
     window_samples = int(window_sec * target_fs)
 
     raw_events = []
-    if method == "two_pass":
-        fine_regions = fit_ar_two_pass(
-            signal, target_fs=target_fs, ar_order=ar_order, window_sec=window_sec,
-            spindle_band=spindle_band, ra=lower_threshold, n_jobs=n_jobs, verbose=True,
-        )
-        for region in fine_regions:
-            evs = _detect_events_in_region(
-                region["r"], region["f"], region["sample_starts"],
-                target_fs, window_samples, upper_threshold, lower_threshold,
-            )
-            raw_events.extend(evs)
-    else:
-        r_timeseries, f_timeseries = fit_ar_on_prepared_signal(
-            signal, target_fs=target_fs, ar_order=ar_order, window_sec=window_sec,
-            spindle_band=spindle_band, n_jobs=n_jobs, verbose=True,
-        )
-        if len(r_timeseries) == 0:
-            logging.warning("Signal too short for window.")
-            return np.empty((0, 6))
-        raw_events = _detect_events_in_region(
-            r_timeseries, f_timeseries, np.arange(len(r_timeseries)),
-            target_fs, window_samples, upper_threshold, lower_threshold,
-        )
+    r_timeseries, f_timeseries = fit_ar_on_prepared_signal(
+        signal, target_fs=target_fs, ar_order=ar_order, window_sec=window_sec,
+        spindle_band=spindle_band, n_jobs=n_jobs, verbose=True,
+    )
+    if len(r_timeseries) == 0:
+        logging.warning("Signal too short for window.")
+        return np.empty((0, 6))
+    raw_events = _detect_events_in_region(
+        r_timeseries, f_timeseries, np.arange(len(r_timeseries)),
+        target_fs, window_samples, upper_threshold, lower_threshold,
+    )
 
     # Post-processing: consolidate duplicate sliding windows
     final_events = merge_overlapping_events(raw_events, min_gap_sec=min_gap_sec)
