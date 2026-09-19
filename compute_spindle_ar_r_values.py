@@ -17,6 +17,15 @@ For each already-detected spindle we:
 
 Output: one row per spindle event (all your original wavelet columns +
 ar_r_value / ar_peak_freq_hz), plus a correlation/summary report.
+
+READ THE CONFIG BLOCK BELOW BEFORE RUNNING. Channel matching between manifest
+tasks and spindle CSVs is derived from `data_path`'s filename (chanN.mat /
+chanN_trial.mat, per build_manifest.py) -- this field is guaranteed present
+in every task dict, so no guessing needed there anymore.
+
+(Spindle start/end column names and their units are now confirmed:
+spindle_start_index / spindle_end_index are sample indices at FS=1000,
+converted to spindle_start_time_s / spindle_end_time_s at load time.)
 """
 
 import logging
@@ -52,10 +61,15 @@ AR_ORDER = 8
 SPINDLE_BAND = (9, 20)
 WINDOW_PAD_SEC = 1.0   # extend each spindle window by this much on each side before fitting
 
-# Candidate column names for spindle start/end time (seconds). First match wins.
-CANDIDATE_START_COLS = ["spindle_start_time_s", "start_time_s", "start_s", "spindle_start_s", "onset_s"]
-CANDIDATE_END_COLS = ["spindle_end_time_s", "end_time_s", "end_s", "spindle_end_s", "offset_s"]
+# Confirmed exact column names in the wavelet spindle CSVs (spindle_start_index /
+# spindle_end_index are sample indices at FS=1000 -- converted to seconds at load time).
+START_COL = "spindle_start_time_s"
+END_COL = "spindle_end_time_s"
 
+# If your manifest/task dict has an explicit channel field, list its key(s) here.
+# (Confirmed from build_manifest.py: the real manifest has NO channel column --
+# channel lives only in the data filename, e.g. "chan51.mat" / "chan51_7.mat" --
+# so this is just a fallback in case that ever changes.)
 TASK_CHANNEL_KEYS = ["channel", "chan", "channel_num"]
 
 
@@ -72,6 +86,8 @@ def _norm_num(x) -> str:
 
 
 def _get_task_trial(task: dict) -> str:
+    # build_manifest.py writes trial="" when the data file has no trial suffix
+    # (the common case), and the digit string otherwise.
     return _norm_num(task.get("trial"))
 
 OUTPUT_DIR = Path("results_ar_per_spindle")
@@ -115,6 +131,16 @@ def load_all_spindle_events() -> pd.DataFrame:
                             df["file"] = csv_file.name
                             df["channel"] = match.group(1) if match else None
                             df["trial"] = str(match.group(2)) if match and match.group(2) else None
+
+                            # Real wavelet CSVs store spindle timing as *sample indices*
+                            # into the raw signal at FS (1000 Hz), not seconds -- convert
+                            # once here so everything downstream just deals in seconds.
+                            if "spindle_start_index" in df.columns and "spindle_end_index" in df.columns:
+                                df["spindle_start_time_s"] = df["spindle_start_index"] / FS
+                                df["spindle_end_time_s"] = df["spindle_end_index"] / FS
+                            if "spindle_peak_index" in df.columns:
+                                df["spindle_peak_time_s"] = df["spindle_peak_index"] / FS
+
                             rows.append(df)
     if not rows:
         logger.error("No spindle events found under the given ANALYSIS_ROOTS.")
@@ -125,15 +151,12 @@ def load_all_spindle_events() -> pd.DataFrame:
 
 
 def resolve_time_columns(df: pd.DataFrame) -> tuple[str, str]:
-    start_col = next((c for c in CANDIDATE_START_COLS if c in df.columns), None)
-    end_col = next((c for c in CANDIDATE_END_COLS if c in df.columns), None)
-    if start_col is None or end_col is None:
+    if START_COL not in df.columns or END_COL not in df.columns:
         raise ValueError(
-            "Could not find spindle start/end time columns.\n"
-            f"Available columns: {list(df.columns)}\n"
-            "Add the correct names to CANDIDATE_START_COLS / CANDIDATE_END_COLS at the top of this script."
+            f"Expected columns '{START_COL}' / '{END_COL}' not found.\n"
+            f"Available columns: {list(df.columns)}"
         )
-    return start_col, end_col
+    return START_COL, END_COL
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +166,10 @@ def _get_task_channel(task: dict) -> str | None:
     for key in TASK_CHANNEL_KEYS:
         if key in task and task[key] not in (None, ""):
             return str(task[key])
-    m = re.search(r"chan[_ ]?(\d+)", str(task.get("file_name", "")), re.IGNORECASE)
+    # data_path is guaranteed present (used directly by the calibration script),
+    # and build_manifest.py confirms its filename format is chanN.mat / chanN_trial.mat --
+    # so parse it from there rather than relying on however TaskLoader derives file_name.
+    m = re.search(r"chan[_ ]?(\d+)", Path(str(task.get("data_path", ""))).name, re.IGNORECASE)
     return m.group(1) if m else None
 
 
