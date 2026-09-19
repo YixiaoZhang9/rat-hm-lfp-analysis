@@ -143,7 +143,7 @@ def extract_spindles_for_file(task: Dict, thresholds: Dict[str, float]) -> pd.Da
             stride_samples=stride_samples,  # ~15.6 ms stride for 2x speedup
             upper_threshold=thresholds["upper"],
             lower_threshold=thresholds["lower"],
-            spindle_band=(9, 20),
+            spindle_band=(10, 15),
             min_duration_sec=0.4,
             max_duration_sec=3.5,
             n_jobs=INNER_N_JOBS,
