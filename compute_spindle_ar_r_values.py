@@ -82,6 +82,11 @@ TASK_CHANNEL_KEYS = ["channel", "chan", "channel_num"]
 
 
 def _norm_num(x) -> str:
+    """Normalize a channel/trial identifier for matching: '' for missing,
+    numeric values compared without leading zeros or trailing '.0' (e.g.
+    '07' == '7' == 7.0 == '10.0'), since pandas upcasts a trial/channel
+    column with any missing values to float64 (so most real trial numbers
+    arrive here as '10.0', not '10')."""
     if x is None:
         return ""
     x = str(x).strip()
@@ -93,10 +98,36 @@ def _norm_num(x) -> str:
         return x
 
 
+def _parse_channel_trial_from_data_path(data_path) -> tuple:
+    """Parse channel + trial straight from data_path's filename (chanN.mat /
+    chanN_trial.mat, confirmed format from build_manifest.py). We do NOT trust
+    task.get('trial') here -- the original calibrate_threshold script never
+    referenced task['trial'] anywhere, which means TaskLoader.to_tasks() may
+    not actually populate that key at all. If it silently returns None for
+    every task, _norm_num(None) -> '' matches every trial-less spindle but
+    NEVER matches any spindle with a real trial number -- i.e. exactly the
+    near-total mismatch we saw. data_path, by contrast, is guaranteed present
+    (the calibration script uses it directly), so parse from there instead."""
+    name = Path(str(data_path)).name
+    m = re.match(r"chan(\d+)(?:_(\d+))?\.mat$", name, re.IGNORECASE)
+    if not m:
+        return None, ""
+    channel = m.group(1)
+    trial = m.group(2) or ""
+    return channel, trial
+
+
+def _get_task_channel(task: dict) -> str | None:
+    for key in TASK_CHANNEL_KEYS:
+        if key in task and task[key] not in (None, ""):
+            return str(task[key])
+    channel, _ = _parse_channel_trial_from_data_path(task.get("data_path", ""))
+    return channel
+
+
 def _get_task_trial(task: dict) -> str:
-    # build_manifest.py writes trial="" when the data file has no trial suffix
-    # (the common case), and the digit string otherwise.
-    return _norm_num(task.get("trial"))
+    _, trial = _parse_channel_trial_from_data_path(task.get("data_path", ""))
+    return _norm_num(trial)
 
 OUTPUT_DIR = Path("results_ar_per_spindle")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -168,19 +199,8 @@ def resolve_time_columns(df: pd.DataFrame) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- #
-# Step 2: build a lookup from (rat, region, date, channel) -> manifest task
+# Step 2: build a lookup from (rat, region, date, trial, channel) -> manifest task
 # --------------------------------------------------------------------------- #
-def _get_task_channel(task: dict) -> str | None:
-    for key in TASK_CHANNEL_KEYS:
-        if key in task and task[key] not in (None, ""):
-            return str(task[key])
-    # data_path is guaranteed present (used directly by the calibration script),
-    # and build_manifest.py confirms its filename format is chanN.mat / chanN_trial.mat --
-    # so parse it from there rather than relying on however TaskLoader derives file_name.
-    m = re.search(r"chan[_ ]?(\d+)", Path(str(task.get("data_path", ""))).name, re.IGNORECASE)
-    return m.group(1) if m else None
-
-
 def build_task_lookup() -> dict:
     loader = TaskLoader(MANIFEST_PATH)
     tasks = loader.to_tasks()
