@@ -26,6 +26,7 @@ REGION_THRESHOLDS = {
     "PL": {"upper": 0.80, "lower": 0.65},
     "RSC": {"upper": 0.84, "lower": 0.72},
 }
+MERGE_GAP = 0.25
 
 # Each call to find_spindles_lfp does its own internal joblib parallelism across
 # windows. We're already parallelizing across FILES via ProcessPoolExecutor below,
@@ -143,7 +144,7 @@ def extract_spindles_for_file(task: Dict, thresholds: Dict[str, float]) -> pd.Da
             upper_threshold=thresholds["upper"],
             lower_threshold=thresholds["lower"],
             spindle_band=(9, 20),
-            min_gap_sec=0.5,
+            min_gap_sec=MERGE_GAP,
             min_duration_sec=0.4,
             max_duration_sec=3.5,
             n_jobs=INNER_N_JOBS,
