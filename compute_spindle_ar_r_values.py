@@ -3,17 +3,23 @@ compute_spindle_ar_r_values.py
 
 Goal
 ----
-We already have spindle *timestamps* from the wavelet detector (the
+You already have spindle *timestamps* from the wavelet detector (the
 Spindle_detection_results/.../chanX[_trial]_spindles_wavelet.csv files).
-For each already-detected spindle we:
+This script does NOT re-detect anything. For each already-detected spindle
+it:
 
     1. finds the matching raw .mat file via `TaskLoader` / tasks_manifest.csv
-    2. bandpass-filters + downsamples that raw channel once
-    3. slices out exactly the [start_time, end_time] window for that spindle
-       (with optional padding)
-    4. fits a single Burg AR model to that window and pulls out the r-value /
-       peak frequency in the spindle band (reusing `_fit_window` from
-       modules.find_spindles_lfp_o_quality).
+       (same mechanism as your calibrate_threshold script),
+    2. bandpass-filters + downsamples that raw channel once,
+    3. slices out the [start_time, end_time] window for that spindle (padded
+       by WINDOW_PAD_SEC on each side), then chops that span into overlapping
+       AR_WINDOW_SEC-long windows (default 1s, same as the detection
+       pipeline's own window_sec) stepped by AR_WINDOW_STEP_SEC,
+    4. fits a Burg AR model to each chopped window via `_fit_window` (the
+       SAME function the calibration/detection pipeline uses per-window) and
+       keeps the peak r-value / frequency across the span -- mirroring how
+       `_finalize_event` picks the peak r within a detected event, rather
+       than fitting one AR model across the whole variable-length span.
 
 Output: one row per spindle event (all your original wavelet columns +
 ar_r_value / ar_peak_freq_hz), plus a correlation/summary report.
@@ -59,7 +65,9 @@ FS = 1000          # raw sampling rate
 TARGET_FS = 128     # AR fit sampling rate (must match calibration pipeline)
 AR_ORDER = 8
 SPINDLE_BAND = (9, 20)
-WINDOW_PAD_SEC = 1.0   # extend each spindle window by this much on each side before fitting
+WINDOW_PAD_SEC = 0.0   # extend each spindle window by this much on each side before fitting
+AR_WINDOW_SEC = 1.0        # AR fit window length -- matches the detection pipeline's own window_sec
+AR_WINDOW_STEP_SEC = 0.5  # step between successive AR windows within a spindle's span
 
 # Confirmed exact column names in the wavelet spindle CSVs (spindle_start_index /
 # spindle_end_index are sample indices at FS=1000 -- converted to seconds at load time).
@@ -213,13 +221,32 @@ def prepare_signal(data_path: str) -> np.ndarray:
 
 
 def ar_fit_for_event(signal_128: np.ndarray, start_s: float, end_s: float):
+    """Chop the padded spindle span into overlapping AR_WINDOW_SEC-long windows
+    (same window length the detection pipeline itself uses) and return the
+    peak r-value / corresponding frequency found within the span -- mirroring
+    how _finalize_event picks the peak r within a detected event, rather than
+    fitting one AR model across the whole (variable-length) span at once."""
+    window_samples = int(AR_WINDOW_SEC * TARGET_FS)
+    step_samples = max(1, int(AR_WINDOW_STEP_SEC * TARGET_FS))
+
     s_idx = max(0, int((start_s - WINDOW_PAD_SEC) * TARGET_FS))
     e_idx = min(len(signal_128), int((end_s + WINDOW_PAD_SEC) * TARGET_FS))
-    if e_idx <= s_idx:
-        return np.nan, np.nan
-    window = signal_128[s_idx:e_idx]
-    r_val, f_val = _fit_window(window, AR_ORDER, TARGET_FS, SPINDLE_BAND)
-    return r_val, f_val
+
+    # If the (padded) span is shorter than one AR window, extend it forward
+    # just enough to fit one window (bounded by the signal's end).
+    if e_idx - s_idx < window_samples:
+        e_idx = min(len(signal_128), s_idx + window_samples)
+    if e_idx - s_idx < window_samples:
+        return np.nan, np.nan  # not enough signal even after extending (e.g. near recording end)
+
+    best_r, best_f = 0.0, np.nan
+    for w_start in range(s_idx, e_idx - window_samples + 1, step_samples):
+        r_val, f_val = _fit_window(
+            signal_128[w_start:w_start + window_samples], AR_ORDER, TARGET_FS, SPINDLE_BAND
+        )
+        if r_val > best_r:
+            best_r, best_f = r_val, f_val
+    return best_r, best_f
 
 
 def compute_ar_r_values(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
