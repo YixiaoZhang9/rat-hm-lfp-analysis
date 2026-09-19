@@ -251,7 +251,7 @@ def find_spindles_lfp(
     # Re-enable the merge tracking log
     logging.info(
         f"Raw candidate events: {len(raw_events)} -> "
-        f"Merged: {len(final_events)} "
+        f"Post-processed: {len(final_events)} "
         f"({time.time() - t_start:.2f}s)"
     )
 
