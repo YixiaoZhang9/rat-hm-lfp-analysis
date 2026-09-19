@@ -82,15 +82,15 @@ TASK_CHANNEL_KEYS = ["channel", "chan", "channel_num"]
 
 
 def _norm_num(x) -> str:
-    """Normalize a channel/trial identifier for matching: '' for missing,
-    digit strings compared without leading zeros (e.g. '07' == '7'), same
-    convention build_manifest.py uses when matching data/scoring trial suffixes."""
     if x is None:
         return ""
     x = str(x).strip()
     if x == "" or x.lower() == "nan":
         return ""
-    return str(int(x)) if x.isdigit() else x
+    try:
+        return str(int(float(x)))
+    except (ValueError, TypeError):
+        return x
 
 
 def _get_task_trial(task: dict) -> str:
