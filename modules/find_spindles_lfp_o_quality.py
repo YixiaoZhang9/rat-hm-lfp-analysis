@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import time
 
 import joblib
 import numpy as np
@@ -213,10 +214,11 @@ def merge_overlapping_events(
 
 def find_spindles_lfp(
     raw_signal, fs, target_fs=128, ar_order=8, window_sec=1.0,
-    stride_samples=1, upper_threshold=0.80, lower_threshold=0.65,
+    stride_samples=2, upper_threshold=0.80, lower_threshold=0.65,
     spindle_band=(9, 20), min_gap_sec=0.5, min_duration_sec=0.4,
     max_duration_sec=3.5, n_jobs=1,
 ):
+    t_start = time.time()
     filtered_signal = bandpass_filter(raw_signal, lowcut=0.1, highcut=100, fs=fs)
     signal = downsampling(filtered_signal, fs, target_fs)
     window_samples = int(window_sec * target_fs)
@@ -244,6 +246,13 @@ def find_spindles_lfp(
         min_gap_sec=min_gap_sec,
         min_duration_sec=min_duration_sec,
         max_duration_sec=max_duration_sec,
+    )
+
+    # Re-enable the merge tracking log
+    logging.info(
+        f"Raw candidate events: {len(raw_events)} -> "
+        f"Merged (gap<={min_gap_sec}s, {min_duration_sec}-{max_duration_sec}s): {len(final_events)} "
+        f"({time.time() - t_start:.2f}s)"
     )
 
     return final_events
