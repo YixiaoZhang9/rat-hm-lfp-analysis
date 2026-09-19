@@ -20,11 +20,11 @@ from task_loader import TaskLoader
 # Config
 # --------------------------------------------------------------------------- #
 FS = 1000
-BUFFER_SEC = 2.0
+BUFFER_SEC = 1.0
 REGION_THRESHOLDS = {
-    "HPC": 0.91,
-    "PL": 0.89,
-    "RSC": 0.92,
+    "HPC": 0.70,
+    "PL": 0.69,
+    "RSC": 0.77,
 }
 
 # "two_pass" does a coarse scan then refines only flagged regions -- this is the
@@ -138,6 +138,7 @@ def extract_spindles_for_file(task: Dict, threshold: float) -> pd.DataFrame:
             upper_threshold=threshold,
             method=DETECTION_METHOD,
             n_jobs=INNER_N_JOBS,
+            spindle_band=(9, 20)
         )
 
         if len(spindles) > 0:
