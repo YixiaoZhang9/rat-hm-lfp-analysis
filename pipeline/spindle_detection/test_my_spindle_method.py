@@ -143,6 +143,7 @@ def extract_spindles_for_file(task: Dict, thresholds: Dict[str, float]) -> pd.Da
             upper_threshold=thresholds["upper"],
             lower_threshold=thresholds["lower"],
             spindle_band=(9, 20),
+            min_gap_sec=0.5,
             min_duration_sec=0.4,
             max_duration_sec=3.5,
             n_jobs=INNER_N_JOBS,
