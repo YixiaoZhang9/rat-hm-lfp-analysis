@@ -27,12 +27,6 @@ REGION_THRESHOLDS = {
     "RSC": 0.77,
 }
 
-# "two_pass" does a coarse scan then refines only flagged regions -- this is the
-# practical choice for a full-dataset run. "full" fits AR at every sample shift
-# across the whole segment (what calibrate_threshold.py used on 5-min segments) --
-# only use "full" if you have the compute budget and need maximal fidelity.
-DETECTION_METHOD = "full"
-
 # Each call to find_spindles_lfp does its own internal joblib parallelism across
 # windows. We're already parallelizing across FILES via ProcessPoolExecutor below,
 # so the inner call must be n_jobs=1 -- otherwise every outer worker also tries to
@@ -136,7 +130,6 @@ def extract_spindles_for_file(task: Dict, threshold: float) -> pd.DataFrame:
             segment,
             fs=FS,
             upper_threshold=threshold,
-            method=DETECTION_METHOD,
             n_jobs=INNER_N_JOBS,
             spindle_band=(9, 20)
         )
