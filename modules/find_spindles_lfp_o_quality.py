@@ -119,40 +119,65 @@ def fit_ar_on_prepared_signal(
 
 
 def _detect_events_in_region(
-    r, f, sample_starts, target_fs, window_samples, upper_threshold, lower_threshold
+    r, f, sample_starts, target_fs, window_samples,
+    upper_threshold, lower_threshold
 ):
     """
-    Detect event intervals using hysteresis thresholding.
-    Trigger condition: peak R >= upper_threshold.
-    Boundary conditions: R >= lower_threshold.
+    Detect oscillatory events using upper/lower hysteresis.
+
+    upper_threshold (rb):
+        Defines event onset and offset.
+
+    lower_threshold (ra):
+        Determines whether consecutive detections belong to the
+        same continuous event or should be split.
     """
     events = []
     n = len(r)
     i = 0
 
     while i < n:
-        if r[i] >= upper_threshold:
-            # Found peak: walk back to find onset crossing above lower_threshold
-            start_i = i
-            while start_i > 0 and r[start_i - 1] >= lower_threshold:
-                start_i -= 1
 
-            # Walk forward to find offset dropping below lower_threshold
+        # Event starts when r exceeds the upper threshold rb
+        if r[i] > upper_threshold:
+
+            start_i = i
             end_i = i
-            while end_i < n - 1 and r[end_i + 1] >= lower_threshold:
-                end_i += 1
+
+            while end_i < n - 1:
+
+                next_i = end_i + 1
+
+                # Clearly still inside the event
+                if r[next_i] > upper_threshold:
+                    end_i = next_i
+
+                # Between lower and upper threshold:
+                # keep looking because this may be a transient fluctuation
+                elif r[next_i] >= lower_threshold:
+                    end_i = next_i
+
+                # Below lower threshold -> split/end event
+                else:
+                    break
 
             _finalize_event(
-                events, r, f, sample_starts, target_fs, window_samples, start_i, end_i
+                events,
+                r,
+                f,
+                sample_starts,
+                target_fs,
+                window_samples,
+                start_i,
+                end_i,
             )
 
-            # Skip past this event to avoid re-triggering on sub-peaks
             i = end_i + 1
+
         else:
             i += 1
 
     return events
-
 
 def _finalize_event(
     events, r, f, sample_starts, target_fs, window_samples, start_i, end_i
