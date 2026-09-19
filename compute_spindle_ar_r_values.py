@@ -1,43 +1,18 @@
 """
 compute_spindle_ar_r_values.py
 
-Goal
-----
-You already have spindle *timestamps* from the wavelet detector (the
-Spindle_detection_results/.../chanX[_trial]_spindles_wavelet.csv files).
-This script does NOT re-detect anything. For each already-detected spindle
-it:
-
-    1. finds the matching raw .mat file via `TaskLoader` / tasks_manifest.csv
-       (same mechanism as your calibrate_threshold script),
-    2. bandpass-filters + downsamples that raw channel once,
-    3. slices out the [start_time, end_time] window for that spindle (padded
-       by WINDOW_PAD_SEC on each side), then chops that span into overlapping
-       AR_WINDOW_SEC-long windows (default 1s, same as the detection
-       pipeline's own window_sec) stepped by AR_WINDOW_STEP_SEC,
-    4. fits a Burg AR model to each chopped window via `_fit_window` (the
-       SAME function the calibration/detection pipeline uses per-window) and
-       keeps the peak r-value / frequency across the span -- mirroring how
-       `_finalize_event` picks the peak r within a detected event, rather
-       than fitting one AR model across the whole variable-length span.
-
-Output: one row per spindle event (all your original wavelet columns +
-ar_r_value / ar_peak_freq_hz), plus a correlation/summary report.
-
-READ THE CONFIG BLOCK BELOW BEFORE RUNNING. Channel matching between manifest
-tasks and spindle CSVs is derived from `data_path`'s filename (chanN.mat /
-chanN_trial.mat, per build_manifest.py) -- this field is guaranteed present
-in every task dict, so no guessing needed there anymore.
-
-(Spindle start/end column names and their units are now confirmed:
-spindle_start_index / spindle_end_index are sample indices at FS=1000,
-converted to spindle_start_time_s / spindle_end_time_s at load time.)
+For each spindle already detected by the wavelet method, find its raw LFP
+file, chop the spindle's time span into overlapping 1-second windows, fit a
+Burg AR model to each (same method the detection/calibration pipeline uses),
+and keep the peak r-value / frequency. Output: one row per spindle with an
+added ar_r_value + ar_peak_freq_hz, plus correlation/summary reports.
 """
 
 import logging
 import os
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -52,7 +27,7 @@ from modules.find_spindles_lfp_o_quality import _fit_window
 from task_loader import TaskLoader
 
 # --------------------------------------------------------------------------- #
-# CONFIG -- check / edit these before running
+# CONFIG
 # --------------------------------------------------------------------------- #
 ANALYSIS_ROOTS = [
     Path("/mnt/genzel/Rat/HM/Rat_HM_Ephys_TD/Rat_HM_Ephys_TD_Analysis_R1_8"),
@@ -61,271 +36,227 @@ ANALYSIS_ROOTS = [
 SUFFIX = Path("postsleep/wavelet_amp_1_ampcore_3")
 MANIFEST_PATH = "tasks_manifest.csv"
 
-FS = 1000          # raw sampling rate
-TARGET_FS = 128     # AR fit sampling rate (must match calibration pipeline)
+FS = 1000            # raw signal sampling rate
+TARGET_FS = 128       # AR fit sampling rate
 AR_ORDER = 8
 SPINDLE_BAND = (9, 20)
-WINDOW_PAD_SEC = 0.0   # extend each spindle window by this much on each side before fitting
-AR_WINDOW_SEC = 1.0        # AR fit window length -- matches the detection pipeline's own window_sec
-AR_WINDOW_STEP_SEC = 0.5  # step between successive AR windows within a spindle's span
+WINDOW_PAD_SEC = 0.0       # extend each spindle span by this much on each side
+AR_WINDOW_SEC = 1.0        # AR fit window length (matches the detection pipeline)
+AR_WINDOW_STEP_SEC = 0.5   # step between successive AR windows within a spindle's span
 
-# Confirmed exact column names in the wavelet spindle CSVs (spindle_start_index /
-# spindle_end_index are sample indices at FS=1000 -- converted to seconds at load time).
-START_COL = "spindle_start_time_s"
+START_COL = "spindle_start_time_s"  # converted from spindle_start_index (samples @ FS)
 END_COL = "spindle_end_time_s"
-
-# If your manifest/task dict has an explicit channel field, list its key(s) here.
-# (Confirmed from build_manifest.py: the real manifest has NO channel column --
-# channel lives only in the data filename, e.g. "chan51.mat" / "chan51_7.mat" --
-# so this is just a fallback in case that ever changes.)
-TASK_CHANNEL_KEYS = ["channel", "chan", "channel_num"]
-
-
-def _norm_num(x) -> str:
-    """Normalize a channel/trial identifier for matching: '' for missing,
-    numeric values compared without leading zeros or trailing '.0' (e.g.
-    '07' == '7' == 7.0 == '10.0'), since pandas upcasts a trial/channel
-    column with any missing values to float64 (so most real trial numbers
-    arrive here as '10.0', not '10')."""
-    if x is None:
-        return ""
-    x = str(x).strip()
-    if x == "" or x.lower() == "nan":
-        return ""
-    try:
-        return str(int(float(x)))
-    except (ValueError, TypeError):
-        return x
-
-
-def _parse_channel_trial_from_data_path(data_path) -> tuple:
-    """Parse channel + trial straight from data_path's filename (chanN.mat /
-    chanN_trial.mat, confirmed format from build_manifest.py). We do NOT trust
-    task.get('trial') here -- the original calibrate_threshold script never
-    referenced task['trial'] anywhere, which means TaskLoader.to_tasks() may
-    not actually populate that key at all. If it silently returns None for
-    every task, _norm_num(None) -> '' matches every trial-less spindle but
-    NEVER matches any spindle with a real trial number -- i.e. exactly the
-    near-total mismatch we saw. data_path, by contrast, is guaranteed present
-    (the calibration script uses it directly), so parse from there instead."""
-    name = Path(str(data_path)).name
-    m = re.match(r"chan(\d+)(?:_(\d+))?\.mat$", name, re.IGNORECASE)
-    if not m:
-        return None, ""
-    channel = m.group(1)
-    trial = m.group(2) or ""
-    return channel, trial
-
-
-def _get_task_channel(task: dict) -> str | None:
-    for key in TASK_CHANNEL_KEYS:
-        if key in task and task[key] not in (None, ""):
-            return str(task[key])
-    channel, _ = _parse_channel_trial_from_data_path(task.get("data_path", ""))
-    return channel
-
-
-def _get_task_trial(task: dict) -> str:
-    _, trial = _parse_channel_trial_from_data_path(task.get("data_path", ""))
-    return _norm_num(trial)
 
 OUTPUT_DIR = Path("results_ar_per_spindle")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MAX_WORKERS = max(1, os.cpu_count() - 1)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("spindle_ar_r")
-
-
-# --------------------------------------------------------------------------- #
-# Step 1: collect every detected spindle event (not aggregated -- one row each)
-# --------------------------------------------------------------------------- #
-def load_all_spindle_events() -> pd.DataFrame:
-    rows = []
-    for analysis_root in tqdm(ANALYSIS_ROOTS, desc="Analysis folders"):
-        rat_groups = [d for d in analysis_root.iterdir() if d.is_dir()]
-        for rat_group in tqdm(rat_groups, desc=analysis_root.name, leave=False):
-            spindle_root = rat_group / "Spindle_detection_results"
-            if not spindle_root.exists():
-                continue
-            region_dirs = [d for d in spindle_root.iterdir() if d.is_dir()]
-            for region_dir in region_dirs:
-                animal_dirs = [d for d in region_dir.iterdir() if d.is_dir()]
-                for animal_dir in animal_dirs:
-                    date_dirs = [d for d in animal_dir.iterdir() if d.is_dir()]
-                    for date_dir in date_dirs:
-                        csv_folder = date_dir / SUFFIX
-                        if not csv_folder.exists():
-                            continue
-                        for csv_file in csv_folder.glob("*.csv"):
-                            match = re.match(r"chan(\d+)(?:_(\d+))?_spindles_wavelet\.csv$", csv_file.name)
-                            df = pd.read_csv(csv_file)
-                            if df.empty:
-                                continue
-                            df = df.copy()
-                            df["analysis"] = analysis_root.name
-                            df["rat_group"] = rat_group.name
-                            df["region"] = region_dir.name
-                            df["rat_number"] = animal_dir.name
-                            df["date"] = date_dir.name
-                            df["file"] = csv_file.name
-                            df["channel"] = match.group(1) if match else None
-                            df["trial"] = str(match.group(2)) if match and match.group(2) else None
-
-                            # Real wavelet CSVs store spindle timing as *sample indices*
-                            # into the raw signal at FS (1000 Hz), not seconds -- convert
-                            # once here so everything downstream just deals in seconds.
-                            if "spindle_start_index" in df.columns and "spindle_end_index" in df.columns:
-                                df["spindle_start_time_s"] = df["spindle_start_index"] / FS
-                                df["spindle_end_time_s"] = df["spindle_end_index"] / FS
-                            if "spindle_peak_index" in df.columns:
-                                df["spindle_peak_time_s"] = df["spindle_peak_index"] / FS
-
-                            rows.append(df)
-    if not rows:
-        logger.error("No spindle events found under the given ANALYSIS_ROOTS.")
-        return pd.DataFrame()
-    events = pd.concat(rows, ignore_index=True)
-    logger.info(f"Loaded {len(events)} spindle events across {events['file'].nunique()} files.")
-    return events
-
-
-def resolve_time_columns(df: pd.DataFrame) -> tuple[str, str]:
-    if START_COL not in df.columns or END_COL not in df.columns:
-        raise ValueError(
-            f"Expected columns '{START_COL}' / '{END_COL}' not found.\n"
-            f"Available columns: {list(df.columns)}"
-        )
-    return START_COL, END_COL
-
-
-# --------------------------------------------------------------------------- #
-# Step 2: build a lookup from (rat, region, date, trial, channel) -> manifest task
-# --------------------------------------------------------------------------- #
-def build_task_lookup() -> dict:
-    loader = TaskLoader(MANIFEST_PATH)
-    tasks = loader.to_tasks()
-    lookup = {}
-    for t in tasks:
-        channel = _norm_num(_get_task_channel(t))
-        trial = _get_task_trial(t)
-        key = (str(t.get("rat")).strip(), str(t.get("region")).strip(), str(t.get("date")).strip(), trial, channel)
-        lookup[key] = t
-    logger.info(f"Built manifest lookup with {len(lookup)} entries.")
-    return lookup
-
-
-def find_task_for_group(lookup: dict, rat_number, region, date, trial, channel):
-    key = (str(rat_number).strip(), str(region).strip(), str(date).strip(), _norm_num(trial), _norm_num(channel))
-    if key in lookup:
-        return lookup[key]
-    # fall back: ignore channel if there's exactly one task for (rat, region, date, trial)
-    candidates = [
-        t for (r, reg, d, tr, ch), t in lookup.items()
-        if r == str(rat_number).strip()
-        and reg == str(region).strip()
-        and d == str(date).strip()
-        and tr == _norm_num(trial)
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
-
-
-# --------------------------------------------------------------------------- #
-# Step 3: per-file signal prep + per-event AR fit
-# --------------------------------------------------------------------------- #
-def prepare_signal(data_path: str) -> np.ndarray:
-    raw_signal = loadmat(data_path)["data"].squeeze()
-    filtered = bandpass_filter(raw_signal, lowcut=0.1, highcut=100, fs=FS)
-    return downsampling(filtered, FS, TARGET_FS)
-
-
-def ar_fit_for_event(signal_128: np.ndarray, start_s: float, end_s: float):
-    """Chop the padded spindle span into overlapping AR_WINDOW_SEC-long windows
-    (same window length the detection pipeline itself uses) and return the
-    peak r-value / corresponding frequency found within the span -- mirroring
-    how _finalize_event picks the peak r within a detected event, rather than
-    fitting one AR model across the whole (variable-length) span at once."""
-    window_samples = int(AR_WINDOW_SEC * TARGET_FS)
-    step_samples = max(1, int(AR_WINDOW_STEP_SEC * TARGET_FS))
-
-    s_idx = max(0, int((start_s - WINDOW_PAD_SEC) * TARGET_FS))
-    e_idx = min(len(signal_128), int((end_s + WINDOW_PAD_SEC) * TARGET_FS))
-
-    # If the (padded) span is shorter than one AR window, extend it forward
-    # just enough to fit one window (bounded by the signal's end).
-    if e_idx - s_idx < window_samples:
-        e_idx = min(len(signal_128), s_idx + window_samples)
-    if e_idx - s_idx < window_samples:
-        return np.nan, np.nan  # not enough signal even after extending (e.g. near recording end)
-
-    best_r, best_f = 0.0, np.nan
-    for w_start in range(s_idx, e_idx - window_samples + 1, step_samples):
-        r_val, f_val = _fit_window(
-            signal_128[w_start:w_start + window_samples], AR_ORDER, TARGET_FS, SPINDLE_BAND
-        )
-        if r_val > best_r:
-            best_r, best_f = r_val, f_val
-    return best_r, best_f
-
-
-def compute_ar_r_values(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
-    start_col, end_col = resolve_time_columns(events)
-
-    events = events.copy()
-    events["ar_r_value"] = np.nan
-    events["ar_peak_freq_hz"] = np.nan
-
-    # "No trial" is the COMMON case (per build_manifest.py's own docstring), not
-    # missing data -- fill with "" so pandas groupby doesn't silently drop these
-    # rows (it drops NaN/None group keys by default).
-    events["trial"] = events["trial"].fillna("").astype(str)
-
-    unmatched_groups = []
-    group_cols = ["rat_number", "region", "date", "trial", "channel"]
-
-    for (rat_number, region, date, trial, channel), group in tqdm(
-        events.groupby(group_cols), desc="Processing raw files"
-    ):
-        task = find_task_for_group(lookup, rat_number, region, date, trial, channel)
-        if task is None:
-            unmatched_groups.append(
-                {"rat_number": rat_number, "region": region, "date": date, "trial": trial, "channel": channel}
-            )
-            continue
-
-        try:
-            signal_128 = prepare_signal(task["data_path"])
-        except Exception as e:
-            logger.warning(f"Failed to load/prepare {task.get('data_path')}: {e}")
-            continue
-
-        for idx, row in group.iterrows():
-            r_val, f_val = ar_fit_for_event(signal_128, row[start_col], row[end_col])
-            events.at[idx, "ar_r_value"] = r_val
-            events.at[idx, "ar_peak_freq_hz"] = f_val
-
-    if unmatched_groups:
-        unmatched_df = pd.DataFrame(unmatched_groups).drop_duplicates()
-        unmatched_path = OUTPUT_DIR / "unmatched_groups.csv"
-        unmatched_df.to_csv(unmatched_path, index=False)
-        logger.warning(
-            f"{len(unmatched_df)} (rat, region, date, channel) group(s) had no manifest match. "
-            f"See {unmatched_path}"
-        )
-
-    return events
-
-
-# --------------------------------------------------------------------------- #
-# Step 4: statistics -- correlations between AR r-value and wavelet metrics
-# --------------------------------------------------------------------------- #
 WAVELET_METRIC_COLS = [
     "spindle_amplitude",
     "spindle_duration_s",
     "spindle_mean_frequency_hz",
     "spindle_peak_frequency_hz",
 ]
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("spindle_ar_r")
+
+
+# --------------------------------------------------------------------------- #
+# 1. Load every detected spindle event (not aggregated -- one row each)
+# --------------------------------------------------------------------------- #
+def load_all_spindle_events() -> pd.DataFrame:
+    file_pattern = re.compile(r"chan(\d+)(?:_(\d+))?_spindles_wavelet\.csv$")
+    rows = []
+
+    for analysis_root in tqdm(ANALYSIS_ROOTS, desc="Analysis folders"):
+        for rat_group in tqdm([d for d in analysis_root.iterdir() if d.is_dir()],
+                               desc=analysis_root.name, leave=False):
+            spindle_root = rat_group / "Spindle_detection_results"
+            if not spindle_root.exists():
+                continue
+            for region_dir in [d for d in spindle_root.iterdir() if d.is_dir()]:
+                for animal_dir in [d for d in region_dir.iterdir() if d.is_dir()]:
+                    for date_dir in [d for d in animal_dir.iterdir() if d.is_dir()]:
+                        csv_folder = date_dir / SUFFIX
+                        if not csv_folder.exists():
+                            continue
+                        for csv_file in csv_folder.glob("*.csv"):
+                            df = pd.read_csv(csv_file)
+                            if df.empty:
+                                continue
+                            match = file_pattern.match(csv_file.name)
+                            df["region"] = region_dir.name
+                            df["rat_number"] = animal_dir.name
+                            df["date"] = date_dir.name
+                            df["file"] = csv_file.name
+                            df["channel"] = match.group(1) if match else None
+                            df["trial"] = match.group(2) if match and match.group(2) else None
+
+                            # spindle_start_index/end_index are sample indices at FS -- convert to seconds
+                            df[START_COL] = df["spindle_start_index"] / FS
+                            df[END_COL] = df["spindle_end_index"] / FS
+
+                            rows.append(df)
+
+    if not rows:
+        logger.error("No spindle events found under ANALYSIS_ROOTS.")
+        return pd.DataFrame()
+
+    events = pd.concat(rows, ignore_index=True)
+    events["trial"] = events["trial"].fillna("")  # "no trial" is the common case, not missing data
+    logger.info(f"Loaded {len(events)} spindle events across {events['file'].nunique()} files.")
+    return events
+
+
+# --------------------------------------------------------------------------- #
+# 2. Manifest lookup: (rat, region, date, trial, channel) -> task dict
+# --------------------------------------------------------------------------- #
+def normalize_id(x) -> str:
+    """'' for missing; numeric values compared without leading zeros or a
+    trailing '.0' (pandas upcasts a trial/channel column to float64 once any
+    row is missing, so '10' commonly arrives here as 10.0)."""
+    if x is None:
+        return ""
+    x = str(x).strip()
+    if x in ("", "nan"):
+        return ""
+    try:
+        return str(int(float(x)))
+    except ValueError:
+        return x
+
+
+def parse_channel_and_trial(data_path) -> tuple[str | None, str]:
+    """Channel + trial live in the data filename (chanN.mat / chanN_trial.mat),
+    per build_manifest.py. Parsed from data_path directly rather than trusting
+    a task['trial']/['channel'] key, since TaskLoader may not populate either."""
+    match = re.match(r"chan(\d+)(?:_(\d+))?\.mat$", Path(str(data_path)).name, re.IGNORECASE)
+    if not match:
+        return None, ""
+    return match.group(1), (match.group(2) or "")
+
+
+def build_task_lookup() -> dict:
+    tasks = TaskLoader(MANIFEST_PATH).to_tasks()
+    lookup = {}
+    for task in tasks:
+        channel, trial = parse_channel_and_trial(task.get("data_path", ""))
+        key = (
+            str(task.get("rat")).strip(),
+            str(task.get("region")).strip(),
+            str(task.get("date")).strip(),
+            normalize_id(trial),
+            normalize_id(channel),
+        )
+        lookup[key] = task
+    logger.info(f"Built manifest lookup with {len(lookup)} entries.")
+    return lookup
+
+
+def find_task(lookup: dict, rat_number, region, date, trial, channel):
+    key = (str(rat_number).strip(), str(region).strip(), str(date).strip(),
+           normalize_id(trial), normalize_id(channel))
+    return lookup.get(key)
+
+
+# --------------------------------------------------------------------------- #
+# 3. Per-group AR fitting (runs in worker processes)
+# --------------------------------------------------------------------------- #
+def prepare_signal(data_path: str) -> np.ndarray:
+    raw = loadmat(data_path)["data"].squeeze()
+    filtered = bandpass_filter(raw, lowcut=0.1, highcut=100, fs=FS)
+    return downsampling(filtered, FS, TARGET_FS)
+
+
+def ar_fit_for_event(signal_128: np.ndarray, start_s: float, end_s: float) -> tuple[float, float]:
+    """Chop [start_s, end_s] (padded) into overlapping 1s AR windows and
+    return the peak r-value/frequency -- mirroring how the detection pipeline
+    picks the peak r within an event, rather than fitting one AR model
+    across the whole variable-length span."""
+    window_samples = int(AR_WINDOW_SEC * TARGET_FS)
+    step_samples = max(1, int(AR_WINDOW_STEP_SEC * TARGET_FS))
+
+    s_idx = max(0, int((start_s - WINDOW_PAD_SEC) * TARGET_FS))
+    e_idx = min(len(signal_128), int((end_s + WINDOW_PAD_SEC) * TARGET_FS))
+    e_idx = max(e_idx, min(len(signal_128), s_idx + window_samples))  # ensure room for one window
+    if e_idx - s_idx < window_samples:
+        return np.nan, np.nan  # not enough signal even after extending (recording boundary)
+
+    best_r, best_f = 0.0, np.nan
+    for w_start in range(s_idx, e_idx - window_samples + 1, step_samples):
+        r_val, f_val = _fit_window(signal_128[w_start:w_start + window_samples],
+                                    AR_ORDER, TARGET_FS, SPINDLE_BAND)
+        if r_val > best_r:
+            best_r, best_f = r_val, f_val
+    return best_r, best_f
+
+
+def process_group(data_path: str, event_rows: list[tuple]) -> list[tuple]:
+    """Runs in a worker process: load+prep one raw file once, then AR-fit
+    every spindle event that belongs to it. event_rows: [(index, start_s, end_s), ...]."""
+    signal_128 = prepare_signal(data_path)
+    return [(idx, *ar_fit_for_event(signal_128, start_s, end_s)) for idx, start_s, end_s in event_rows]
+
+
+# --------------------------------------------------------------------------- #
+# 4. Orchestration: match groups to files, fan out to workers, collect results
+# --------------------------------------------------------------------------- #
+def compute_ar_r_values(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
+    events = events.copy()
+    events["ar_r_value"] = np.nan
+    events["ar_peak_freq_hz"] = np.nan
+
+    jobs = {}          # data_path -> list of (index, start_s, end_s)
+    unmatched = []
+
+    group_cols = ["rat_number", "region", "date", "trial", "channel"]
+    for (rat_number, region, date, trial, channel), group in events.groupby(group_cols):
+        task = find_task(lookup, rat_number, region, date, trial, channel)
+        if task is None:
+            unmatched.append({"rat_number": rat_number, "region": region, "date": date,
+                               "trial": trial, "channel": channel})
+            continue
+        event_rows = list(zip(group.index, group[START_COL], group[END_COL]))
+        jobs[task["data_path"]] = event_rows
+
+    if unmatched:
+        unmatched_path = OUTPUT_DIR / "unmatched_groups.csv"
+        pd.DataFrame(unmatched).drop_duplicates().to_csv(unmatched_path, index=False)
+        logger.warning(f"{len(unmatched)} group(s) had no manifest match. See {unmatched_path}")
+
+    logger.info(f"Fitting AR models across {len(jobs)} raw files using {MAX_WORKERS} workers.")
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_group, path, rows): path for path, rows in jobs.items()}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing raw files"):
+            data_path = futures[future]
+            try:
+                for idx, r_val, f_val in future.result():
+                    events.at[idx, "ar_r_value"] = r_val
+                    events.at[idx, "ar_peak_freq_hz"] = f_val
+            except Exception as e:
+                logger.warning(f"Failed on {data_path}: {e}")
+
+    return events
+
+
+# --------------------------------------------------------------------------- #
+# 5. Statistics
+# --------------------------------------------------------------------------- #
+def correlate(df: pd.DataFrame, group_col: str | None = None) -> pd.DataFrame:
+    rows = []
+    groups = df.groupby(group_col) if group_col else [(None, df)]
+    for group_val, sub_df in groups:
+        for col in WAVELET_METRIC_COLS:
+            sub = sub_df.dropna(subset=[col, "ar_r_value"])
+            if len(sub) < 3:
+                continue
+            r, p = pearsonr(sub["ar_r_value"], sub[col])
+            row = {"metric": col, "n": len(sub), "pearson_r": round(r, 4), "p_value": p}
+            if group_col:
+                row = {group_col: group_val, **row}
+            rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def analyze_correlations(df: pd.DataFrame):
@@ -334,48 +265,16 @@ def analyze_correlations(df: pd.DataFrame):
         logger.error("No rows with a valid ar_r_value -- nothing to correlate.")
         return
 
-    # Overall correlations
-    overall_rows = []
-    for col in WAVELET_METRIC_COLS:
-        if col not in df.columns:
-            continue
-        sub = df.dropna(subset=[col, "ar_r_value"])
-        if len(sub) < 3:
-            continue
-        r, p = pearsonr(sub["ar_r_value"], sub[col])
-        overall_rows.append({"metric": col, "n": len(sub), "pearson_r": round(r, 4), "p_value": p})
-    overall_df = pd.DataFrame(overall_rows)
-    overall_path = OUTPUT_DIR / "correlations_overall.csv"
-    overall_df.to_csv(overall_path, index=False)
-    logger.info(f"Saved overall correlations to {overall_path}")
+    overall = correlate(df)
+    overall.to_csv(OUTPUT_DIR / "correlations_overall.csv", index=False)
     print("\n--- Overall correlations: ar_r_value vs wavelet metrics ---")
-    print(overall_df.to_string(index=False))
+    print(overall.to_string(index=False))
 
-    # Per-region breakdown
-    per_region_rows = []
-    for region, region_df in df.groupby("region"):
-        for col in WAVELET_METRIC_COLS:
-            if col not in region_df.columns:
-                continue
-            sub = region_df.dropna(subset=[col, "ar_r_value"])
-            if len(sub) < 3:
-                continue
-            r, p = pearsonr(sub["ar_r_value"], sub[col])
-            per_region_rows.append(
-                {"region": region, "metric": col, "n": len(sub), "pearson_r": round(r, 4), "p_value": p}
-            )
-    per_region_df = pd.DataFrame(per_region_rows)
-    per_region_path = OUTPUT_DIR / "correlations_by_region.csv"
-    per_region_df.to_csv(per_region_path, index=False)
-    logger.info(f"Saved per-region correlations to {per_region_path}")
+    correlate(df, "region").to_csv(OUTPUT_DIR / "correlations_by_region.csv", index=False)
 
-    # Summary stats of ar_r_value itself by rat/region
-    summary = df.groupby(["rat_number", "region"])["ar_r_value"].agg(
-        mean="mean", median="median", std="std", n="count"
-    ).reset_index()
-    summary_path = OUTPUT_DIR / "ar_r_value_summary_by_rat_region.csv"
-    summary.to_csv(summary_path, index=False)
-    logger.info(f"Saved ar_r_value summary by rat/region to {summary_path}")
+    summary = df.groupby(["rat_number", "region"])["ar_r_value"] \
+        .agg(mean="mean", median="median", std="std", n="count").reset_index()
+    summary.to_csv(OUTPUT_DIR / "ar_r_value_summary_by_rat_region.csv", index=False)
     print("\n--- ar_r_value summary by rat/region ---")
     print(summary.to_string(index=False))
 
