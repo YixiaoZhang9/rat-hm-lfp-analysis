@@ -26,7 +26,7 @@ REGION_THRESHOLDS = {
     "PL": {"upper": 0.80, "lower": 0.65},
     "RSC": {"upper": 0.84, "lower": 0.72},
 }
-MERGE_GAP = 0.75
+MERGE_GAP = 0.2
 
 # Each call to find_spindles_lfp does its own internal joblib parallelism across
 # windows. We're already parallelizing across FILES via ProcessPoolExecutor below,
