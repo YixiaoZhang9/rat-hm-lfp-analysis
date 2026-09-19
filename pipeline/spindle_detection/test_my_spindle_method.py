@@ -212,7 +212,7 @@ def run_extraction(tasks: List[Dict]):
 
     logger.info(
         f"Loaded {len(tasks)} file(s) for extraction. Utilizing {MAX_WORKERS} concurrent "
-        f"workers, method='{DETECTION_METHOD}', thresholds={REGION_THRESHOLDS}."
+        f"workers, thresholds={REGION_THRESHOLDS}."
     )
 
     all_dfs = []
