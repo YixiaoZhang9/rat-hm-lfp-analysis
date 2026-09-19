@@ -197,50 +197,30 @@ def _finalize_event(
     events.append([start_time, peak_time, end_time, duration, max_r, peak_frequency])
 
 
-def merge_overlapping_events(
+def filter_events_by_duration(
     events_list,
-    min_gap_sec=0.5,
     min_duration_sec=0.4,
     max_duration_sec=3.5,
 ):
-    """
-    Merge events that overlap or occur within min_gap_sec of each other,
-    then filter by biological spindle duration limits.
-    """
+    """Keep events within the accepted spindle duration range."""
     if not events_list:
         return np.empty((0, 6))
 
-    events = sorted(events_list, key=lambda x: x[0])
-    merged = []
+    events = np.asarray(events_list)
 
-    curr_start, curr_peak, curr_end, _, curr_max_r, curr_freq = events[0]
+    durations = events[:, 3]
 
-    for next_ev in events[1:]:
-        n_start, n_peak, n_end, _, n_max_r, n_freq = next_ev
+    mask = (
+        (durations >= min_duration_sec)
+        & (durations <= max_duration_sec)
+    )
 
-        # Merge if overlapping or separated by <= min_gap_sec
-        if n_start <= curr_end + min_gap_sec:
-            curr_end = max(curr_end, n_end)
-            if n_max_r > curr_max_r:
-                curr_max_r = n_max_r
-                curr_peak = n_peak
-                curr_freq = n_freq
-        else:
-            dur = curr_end - curr_start
-            if min_duration_sec <= dur <= max_duration_sec:
-                merged.append([curr_start, curr_peak, curr_end, dur, curr_max_r, curr_freq])
-            curr_start, curr_peak, curr_end, _, curr_max_r, curr_freq = next_ev
-
-    dur = curr_end - curr_start
-    if min_duration_sec <= dur <= max_duration_sec:
-        merged.append([curr_start, curr_peak, curr_end, dur, curr_max_r, curr_freq])
-
-    return np.asarray(merged) if merged else np.empty((0, 6))
+    return events[mask]
 
 def find_spindles_lfp(
     raw_signal, fs, target_fs=128, ar_order=8, window_sec=1.0,
     stride_samples=2, upper_threshold=0.80, lower_threshold=0.65,
-    spindle_band=(9, 20), min_gap_sec=0.5, min_duration_sec=0.4,
+    spindle_band=(9, 20), min_duration_sec=0.4,
     max_duration_sec=3.5, n_jobs=1,
 ):
     t_start = time.time()
@@ -266,9 +246,8 @@ def find_spindles_lfp(
         target_fs, window_samples, upper_threshold, lower_threshold,
     )
 
-    final_events = merge_overlapping_events(
+    final_events = filter_events_by_duration(
         raw_events,
-        min_gap_sec=min_gap_sec,
         min_duration_sec=min_duration_sec,
         max_duration_sec=max_duration_sec,
     )

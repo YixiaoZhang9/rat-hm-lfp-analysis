@@ -22,11 +22,11 @@ from task_loader import TaskLoader
 FS = 1000
 BUFFER_SEC = 1.0
 REGION_THRESHOLDS = {
-    "HPC": {"upper": 0.82, "lower": 0.65},
-    "PL": {"upper": 0.80, "lower": 0.65},
-    "RSC": {"upper": 0.84, "lower": 0.72},
+    "HPC": {"upper": 0.82, "lower": 0.40},
+    "PL": {"upper": 0.80, "lower": 0.40},
+    "RSC": {"upper": 0.84, "lower": 0.51},
 }
-MERGE_GAP = 0.5
+stride_samples= 4
 
 # Each call to find_spindles_lfp does its own internal joblib parallelism across
 # windows. We're already parallelizing across FILES via ProcessPoolExecutor below,
@@ -140,11 +140,10 @@ def extract_spindles_for_file(task: Dict, thresholds: Dict[str, float]) -> pd.Da
             target_fs=128,
             ar_order=8,
             window_sec=1.0,
-            stride_samples=2,  # ~15.6 ms stride for 2x speedup
+            stride_samples=stride_samples,  # ~15.6 ms stride for 2x speedup
             upper_threshold=thresholds["upper"],
             lower_threshold=thresholds["lower"],
             spindle_band=(9, 20),
-            min_gap_sec=MERGE_GAP,
             min_duration_sec=0.4,
             max_duration_sec=3.5,
             n_jobs=INNER_N_JOBS,
