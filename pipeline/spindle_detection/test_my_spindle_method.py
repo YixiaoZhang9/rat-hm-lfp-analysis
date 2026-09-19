@@ -281,9 +281,24 @@ def run_extraction(tasks: List[Dict]):
                     if failures:
                         pd.DataFrame(failures).to_csv(FAILED_OUT_CSV, index=False)
         except KeyboardInterrupt:
-            logger.warning("Terminating workers immediately...")
+            logger.warning(
+                "\nKeyboardInterrupt detected! Saving current progress and exiting safely..."
+            )
             executor.shutdown(wait=False, cancel_futures=True)
-            raise
+            pbar.close()
+
+            # Save checkpoints of what we have so far
+            if all_dfs:
+                master_df = pd.concat(all_dfs, ignore_index=True)
+                master_df.to_csv(SPINDLES_OUT_CSV, index=False)
+                logger.info(
+                    f"Saved partial results ({len(master_df)} spindles) to '{SPINDLES_OUT_CSV}'"
+                )
+            if failures:
+                pd.DataFrame(failures).to_csv(FAILED_OUT_CSV, index=False)
+                logger.info(f"Saved failure details to '{FAILED_OUT_CSV}'")
+
+            sys.exit(0)
 
     pbar.close()
 
