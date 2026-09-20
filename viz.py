@@ -13,9 +13,7 @@ Usage:
         --wavelet-csv /path/to/wavelet_spindles_with_ar_dynamics.csv
 
 Paths can also be supplied via environment variables (SPINDLE_MANIFEST,
-SPINDLE_AR_CSV, SPINDLE_WAVELET_CSV) so the script isn't tied to one
-machine's directory layout. If nothing is supplied, the tool still starts
-and lets you know what's missing instead of crashing on launch.
+SPINDLE_AR_CSV, SPINDLE_WAVELET_CSV).
 """
 
 import argparse
@@ -33,6 +31,27 @@ from scipy.io import loadmat
 from scipy.signal import butter, filtfilt
 
 # --------------------------------------------------------------------------- #
+# Optional: on-the-fly AR "R" profile computation for both AR and Wavelet
+# detected events.
+# --------------------------------------------------------------------------- #
+_AR_LIVE_IMPORT_ERROR = None
+try:
+    AR_MODULES_ROOT = os.environ.get(
+        "AR_MODULES_ROOT",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")),
+    )
+    if AR_MODULES_ROOT not in sys.path:
+        sys.path.append(AR_MODULES_ROOT)
+    from modules.ephys_preprocessing import bandpass_filter as ar_bandpass_filter
+    from modules.ephys_preprocessing import downsampling as ar_downsampling
+    from modules.find_spindles_lfp_o_quality import _fit_window as ar_fit_window
+
+    AR_LIVE_ANALYSIS_AVAILABLE = True
+except Exception as _e:
+    AR_LIVE_ANALYSIS_AVAILABLE = False
+    _AR_LIVE_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+
+# --------------------------------------------------------------------------- #
 # Paths & Default Configuration
 # --------------------------------------------------------------------------- #
 DEFAULT_MANIFEST = os.environ.get("SPINDLE_MANIFEST", "tasks_manifest.csv")
@@ -44,22 +63,21 @@ DEFAULT_WAVELET_CSV = os.environ.get(
 FS = 1000.0
 BP_LOW = 10.0
 BP_HIGH = 15.0
-VIEW_PADDING_SEC = 2.5
+VIEW_WINDOW_SEC = 10.0  # total width of the plot view shown at one time
+
+AR_TARGET_FS = 128
+AR_ORDER = 8
+AR_SPINDLE_BAND = (BP_LOW, BP_HIGH)
+AR_WINDOW_SEC = 1.0
+AR_STRIDE_SAMPLES = 4
 
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
-# The wavelet CSV carries a within-event R trend sampled at these relative
-# positions (r_profile_0% .. r_profile_100%). We use these to draw a real
-# up/down R curve across each event's [Start_s, End_s] span, rather than a
-# single summary point.
 PROFILE_PERCENTS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 PROFILE_COLS = [f"r_profile_{p}%" for p in PROFILE_PERCENTS]
 
 
 def build_profile_curve(events_df: pd.DataFrame):
-    """Builds a single (x, y) pair tracing the R profile across every event in
-    events_df, in time order, with NaN gaps between events so the line does
-    not connect across the silence between spindles."""
     if events_df.empty or not all(c in events_df.columns for c in PROFILE_COLS):
         return np.array([]), np.array([])
 
@@ -76,6 +94,109 @@ def build_profile_curve(events_df: pd.DataFrame):
         xs.append(np.nan)
         ys.append(np.nan)
     return np.array(xs, dtype=float), np.array(ys, dtype=float)
+
+
+def analyze_spindle_r_dynamics(
+    signal_128: np.ndarray,
+    start_s: float,
+    end_s: float,
+    window_sec: float = AR_WINDOW_SEC,
+    stride_samples: int = AR_STRIDE_SAMPLES,
+    target_fs: int = AR_TARGET_FS,
+    spindle_band=AR_SPINDLE_BAND,
+    ar_order: int = AR_ORDER,
+) -> dict:
+    win_samples = int(window_sec * target_fs)
+    half_win = win_samples // 2
+
+    c_start = int(round(start_s * target_fs))
+    c_end = int(round(end_s * target_fs))
+
+    centers = np.arange(c_start, max(c_start + 1, c_end + 1), stride_samples)
+    r_series, f_series = [], []
+
+    for c in centers:
+        w_start = c - half_win
+        w_end = w_start + win_samples
+        if w_start < 0 or w_end > len(signal_128):
+            continue
+        r_val, f_val = ar_fit_window(signal_128[w_start:w_end], ar_order, target_fs, spindle_band)
+        r_series.append(r_val)
+        f_series.append(f_val)
+
+    if not r_series:
+        return {
+            "r_max": np.nan, "r_min": np.nan, "r_mean": np.nan,
+            "r_start": np.nan, "r_end": np.nan, "r_peak_freq": np.nan,
+            "r_profile": [np.nan] * len(PROFILE_COLS), "in_band_ratio": 0.0,
+            "n_windows": 0,
+        }
+
+    r_arr = np.array(r_series)
+    f_arr = np.array(f_series)
+    n_windows = len(r_arr)
+
+    valid_mask = r_arr > 0
+    in_band_ratio = float(np.mean(valid_mask))
+
+    if not np.any(valid_mask):
+        return {
+            "r_max": np.nan, "r_min": np.nan, "r_mean": np.nan,
+            "r_start": np.nan, "r_end": np.nan, "r_peak_freq": np.nan,
+            "r_profile": [np.nan] * len(PROFILE_COLS), "in_band_ratio": in_band_ratio,
+            "n_windows": n_windows,
+        }
+
+    valid_r = r_arr[valid_mask]
+    peak_idx = int(np.argmax(r_arr))
+
+    if len(r_arr) >= 2:
+        x_norm = np.linspace(0, 1, len(r_arr))
+        try:
+            from scipy.interpolate import interp1d
+            interpolator = interp1d(x_norm, r_arr, kind="linear", bounds_error=False, fill_value="extrapolate")
+            profile = interpolator(np.linspace(0, 1, len(PROFILE_COLS))).tolist()
+        except Exception:
+            profile = np.interp(np.linspace(0, 1, len(PROFILE_COLS)), x_norm, r_arr).tolist()
+    else:
+        profile = [float(r_arr[0])] * len(PROFILE_COLS)
+
+    return {
+        "r_max": float(r_arr[peak_idx]),
+        "r_min": float(np.min(valid_r)),
+        "r_mean": float(np.mean(valid_r)),
+        "r_start": float(r_arr[0]),
+        "r_end": float(r_arr[-1]),
+        "r_peak_freq": float(f_arr[peak_idx]),
+        "r_profile": profile,
+        "in_band_ratio": in_band_ratio,
+        "n_windows": n_windows,
+    }
+
+
+class LiveProfileWorker(QtCore.QThread):
+    finished_ok = QtCore.pyqtSignal(dict)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, raw_signal, tasks, parent=None):
+        super().__init__(parent)
+        self.raw_signal = raw_signal
+        # tasks = {"AR": [(idx, start, end), ...], "WAV": [(idx, start, end), ...]}
+        self.tasks = tasks
+
+    def run(self):
+        try:
+            filtered = ar_bandpass_filter(self.raw_signal, lowcut=0.1, highcut=100, fs=FS)
+            signal_128 = ar_downsampling(filtered, FS, AR_TARGET_FS)
+            results = {"AR": {}, "WAV": {}}
+
+            for kind, events_list in self.tasks.items():
+                for idx, start_s, end_s in events_list:
+                    results[kind][idx] = analyze_spindle_r_dynamics(signal_128, start_s, end_s)
+
+            self.finished_ok.emit(results)
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
@@ -114,7 +235,6 @@ def parse_channel_trial(data_path: str):
 
 
 def safe_float(val, default=np.nan):
-    """Coerce a value to float, never raising, for safe display formatting."""
     try:
         f = float(val)
         if np.isnan(f):
@@ -125,7 +245,6 @@ def safe_float(val, default=np.nan):
 
 
 def fmt(val, spec=".4f", placeholder="N/A"):
-    """Format a possibly-missing/non-numeric value without ever crashing the UI."""
     f = safe_float(val)
     if np.isnan(f):
         return placeholder
@@ -133,15 +252,6 @@ def fmt(val, spec=".4f", placeholder="N/A"):
 
 
 def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
-    """
-    Scans for possible column names indicating start/end times or sample indices
-    and converts them to seconds (Start_s and End_s).
-
-    Returns (df, resolved) where `resolved` is False if no usable start/end
-    columns could be found (Start_s/End_s were filled with 0.0 as a
-    fallback) so callers can warn the user instead of silently drawing
-    zero-length/zero-position regions.
-    """
     if df.empty:
         return df, True
 
@@ -159,16 +269,9 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
     ]
 
     def find_column(candidates):
-        # Pass 1: exact header match (case-insensitive), in priority order.
         for cand in candidates:
             if cand in cols_lower:
                 return cols_lower[cand]
-        # Pass 2: substring match, still in priority order, so a specific
-        # candidate like "start_time" is preferred over a generic one like
-        # "start" even when both would technically match. This lets headers
-        # like "spindle_start_time_s" resolve correctly without accidentally
-        # grabbing an unrelated column such as "nrem_bout_start_index" that
-        # merely happens to contain "start".
         for cand in candidates:
             for lower_name, orig_name in cols_lower.items():
                 if cand in lower_name:
@@ -198,7 +301,6 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
             df["End_s"] = ends
         return df, True
 
-    # Fallback: nothing usable found.
     if "start_s" not in df.columns:
         df["Start_s"] = 0.0
     if "end_s" not in df.columns:
@@ -207,9 +309,6 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
 
 
 class SignalLoader(QtCore.QThread):
-    """Loads a .mat trace and band-pass filters it off the GUI thread so large
-    recordings don't freeze the interface while filtfilt runs."""
-
     finished_ok = QtCore.pyqtSignal(np.ndarray, np.ndarray)
     failed = QtCore.pyqtSignal(str)
 
@@ -230,7 +329,7 @@ class SignalLoader(QtCore.QThread):
                 raw = raw.reshape(-1)
             filtered = butter_bandpass_filter(raw, BP_LOW, BP_HIGH, FS).astype(np.float32)
             self.finished_ok.emit(raw, filtered)
-        except Exception as e:  # noqa: BLE001 - surface any failure to the UI
+        except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
@@ -259,18 +358,17 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.data_len = 0
 
         self._loader_thread = None
-        self._pending_task = None  # manifest row awaiting async load completion
+        self._live_profile_thread = None
+        self._pending_task = None
 
         self.init_ui()
         self.load_data()
 
-    # ------------------------------------------------------------------ UI ---
     def init_ui(self):
         main_widget = QtWidgets.QWidget()
         self.setCentralWidget(main_widget)
         root_layout = QtWidgets.QVBoxLayout(main_widget)
 
-        # Dataset Filtering
         filter_box = QtWidgets.QGroupBox("Dataset Filtering")
         filter_layout = QtWidgets.QHBoxLayout()
 
@@ -293,7 +391,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         filter_box.setLayout(filter_layout)
         root_layout.addWidget(filter_box)
 
-        # Navigation Bar
         nav_box = QtWidgets.QGroupBox("Detection Navigation")
         nav_layout = QtWidgets.QHBoxLayout()
 
@@ -334,7 +431,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         lbl_wav_legend.setStyleSheet("color: #00e5ff; font-weight: bold;")
         nav_layout.addWidget(lbl_wav_legend)
 
-        lbl_rprofile_legend = QtWidgets.QLabel("— R profile (per wavelet event)")
+        lbl_rprofile_legend = QtWidgets.QLabel("— WAV R profile (live-computed)")
         lbl_rprofile_legend.setStyleSheet("color: #26c6da; font-weight: bold;")
         nav_layout.addWidget(lbl_rprofile_legend)
 
@@ -342,11 +439,14 @@ class SpindleViewer(QtWidgets.QMainWindow):
         lbl_maxr_legend.setStyleSheet("color: #ff5722; font-weight: bold;")
         nav_layout.addWidget(lbl_maxr_legend)
 
+        lbl_ar_profile_legend = QtWidgets.QLabel("— AR R profile (live-computed)")
+        lbl_ar_profile_legend.setStyleSheet("color: #ffab40; font-weight: bold;")
+        nav_layout.addWidget(lbl_ar_profile_legend)
+
         nav_layout.addStretch(1)
         nav_box.setLayout(nav_layout)
         root_layout.addWidget(nav_box)
 
-        # Viewports
         pg.setConfigOptions(antialias=False)
         self.graphics_layout = pg.GraphicsLayoutWidget()
         root_layout.addWidget(self.graphics_layout, stretch=1)
@@ -365,17 +465,11 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_r.showGrid(x=True, y=True, alpha=0.3)
         self.p_r.setLabel("left", "R value")
         self.p_r.setLabel("bottom", "Time", units="s")
-        # Continuous R trend traced across each wavelet event's own duration,
-        # from its r_profile_0%..100% columns. This is real per-event data
-        # from the wavelet CSV, not an estimate.
+
         self.curve_r_profile = self.p_r.plot(
             pen=pg.mkPen(color="#26c6da", width=2),
             connect="finite",
         )
-        # One summary point (Max_R) per AR-detected event. Left as isolated
-        # markers rather than connected by a line: AR only gives us one R
-        # value per detected event, so a line between events would imply a
-        # measured value in between that was never actually computed.
         self.curve_r = self.p_r.plot(
             pen=None,
             symbol="o",
@@ -383,17 +477,16 @@ class SpindleViewer(QtWidgets.QMainWindow):
             symbolBrush="#ff5722",
             symbolPen=pg.mkPen(color="w", width=0.5),
         )
+        self.curve_ar_r_profile = self.p_r.plot(
+            pen=pg.mkPen(color="#ffab40", width=2),
+            connect="finite",
+        )
 
         self.p_filt.setXLink(self.p_raw)
         self.p_r.setXLink(self.p_raw)
-        # Plots that each region-span triple maps onto, in the same order
-        # draw_spans/clear_plots create the triples in. Keeping this explicit
-        # avoids relying on item.getViewBox(), which can raise once an item
-        # has already been detached from its view.
         self._span_plots = (self.p_raw, self.p_filt, self.p_r)
         self.region_items = []
 
-        # Info Box
         self.details_panel = QtWidgets.QTextEdit()
         self.details_panel.setReadOnly(True)
         self.details_panel.setMaximumHeight(90)
@@ -404,13 +497,11 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.status_bar = self.statusBar()
 
-        # Shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, self.on_prev_ar_event)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, self.on_next_ar_event)
         QtWidgets.QShortcut(QtGui.QKeySequence("W"), self, self.on_next_wav_event)
         QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, self.on_prev_wav_event)
 
-    # -------------------------------------------------------------- Loading ---
     def load_data(self):
         if not os.path.exists(self.manifest_path):
             self.details_panel.setText(
@@ -454,10 +545,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.details_panel.setText("Manifest loaded but contains no usable rows.")
             return
 
-        # AR Loading
         self.ar_df = self._load_detection_csv(self.ar_csv_path, kind="AR")
-
-        # Wavelet Loading
         self.wavelet_df = self._load_detection_csv(self.wavelet_csv_path, kind="Wavelet", is_wavelet=True)
 
         self.populate_rat_selector()
@@ -574,12 +662,17 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_filt.clear()
         self.curve_r.clear()
         self.curve_r_profile.clear()
+        self.curve_ar_r_profile.clear()
         self._remove_span_items()
         self.current_ar_events = pd.DataFrame()
         self.current_wavelet_events = pd.DataFrame()
         self.lbl_ar_tracker.setText("AR: 0 / 0")
         self.lbl_wav_tracker.setText("WAV: 0 / 0")
         self.details_panel.setText("No recordings match current Rat and Region filters.")
+
+        if self._live_profile_thread is not None and self._live_profile_thread.isRunning():
+            self._live_profile_thread.quit()
+            self._live_profile_thread.wait()
 
     def _remove_span_items(self):
         for triple in self.region_items:
@@ -590,7 +683,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
                     pass
         self.region_items.clear()
 
-    # ---------------------------------------------------------- File select ---
     def on_file_selected(self, index):
         if index < 0 or self.manifest_df is None or self.combo_files.count() == 0:
             return
@@ -606,7 +698,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.details_panel.setText(f"File missing on disk: {data_path}")
             return
 
-        # Kick off async load/filter so the UI doesn't freeze on large files.
         self._pending_task = task
         self.combo_files.setEnabled(False)
         self.status_bar.showMessage(f"Loading {Path(data_path).name} ...")
@@ -643,7 +734,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         file_name = task["File"]
 
-        # Filter AR detections
         if not self.ar_df.empty:
             if "File" in self.ar_df.columns and (self.ar_df["File"] == file_name).any():
                 ar_sub = self.ar_df[self.ar_df["File"] == file_name]
@@ -659,7 +749,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         else:
             self.current_ar_events = pd.DataFrame()
 
-        # Filter Wavelet detections with graceful fallbacks
         if not self.wavelet_df.empty:
             w_df = self.wavelet_df
             wav_sub = w_df[
@@ -698,11 +787,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
         else:
             self.curve_r.clear()
 
-        x_prof, y_prof = build_profile_curve(self.current_wavelet_events)
-        if len(x_prof):
-            self.curve_r_profile.setData(x_prof, y_prof)
-        else:
-            self.curve_r_profile.clear()
+        self.curve_ar_r_profile.clear()
+        self.curve_r_profile.clear()
 
         self.draw_spans()
 
@@ -716,22 +802,90 @@ class SpindleViewer(QtWidgets.QMainWindow):
             f"WAV: {max(0, self.current_wav_idx + 1)} / {len(self.current_wavelet_events)}"
         )
 
+        self._start_live_profile_computation()
+
         if self.current_ar_idx >= 0:
             self.jump_to_ar_event()
         elif self.current_wav_idx >= 0:
             self.jump_to_wav_event()
         else:
-            self.p_raw.setXRange(0, min(30.0, self.data_len / FS), padding=0)
+            self.p_raw.setXRange(0, min(VIEW_WINDOW_SEC, self.data_len / FS), padding=0)
             self.details_panel.setText(
                 f"File: {file_name} | Length: {self.data_len/FS:.1f}s | "
                 f"No spindle detections found for this recording."
             )
 
-    # -------------------------------------------------------------- Drawing ---
+    def _start_live_profile_computation(self):
+        if not AR_LIVE_ANALYSIS_AVAILABLE:
+            if _AR_LIVE_IMPORT_ERROR:
+                self.status_bar.showMessage(
+                    f"AR R-profile modules not importable ({_AR_LIVE_IMPORT_ERROR}); "
+                    f"Set AR_MODULES_ROOT if your repo layout differs.", 12000
+                )
+            return
+
+        if self.raw_signal is None:
+            return
+
+        tasks = {"AR": [], "WAV": []}
+
+        for name, events_df in [("AR", self.current_ar_events), ("WAV", self.current_wavelet_events)]:
+            if not events_df.empty:
+                for idx, row in events_df.iterrows():
+                    s, e = safe_float(row.get("Start_s")), safe_float(row.get("End_s"))
+                    if not (np.isnan(s) or np.isnan(e)) and e > s:
+                        tasks[name].append((idx, s, e))
+
+        if not tasks["AR"] and not tasks["WAV"]:
+            return
+
+        if self._live_profile_thread is not None and self._live_profile_thread.isRunning():
+            self._live_profile_thread.quit()
+            self._live_profile_thread.wait()
+
+        self.status_bar.showMessage(f"Computing live AR R profiles for {len(tasks['AR'])} AR and {len(tasks['WAV'])} WAV event(s)...")
+        self._live_profile_thread = LiveProfileWorker(self.raw_signal, tasks)
+        self._live_profile_thread.finished_ok.connect(self._on_live_profiles_ready)
+        self._live_profile_thread.failed.connect(lambda msg: self.status_bar.showMessage(f"Live profiling failed: {msg}", 12000))
+        self._live_profile_thread.start()
+
+    def _on_live_profiles_ready(self, results):
+        self.status_bar.clearMessage()
+
+        for idx, metrics in results.get("AR", {}).items():
+            if idx in self.current_ar_events.index:
+                for k, v in metrics.items():
+                    if k == "r_profile":
+                        for col, val in zip(PROFILE_COLS, v):
+                            self.current_ar_events.at[idx, col] = val
+                    else:
+                        self.current_ar_events.at[idx, k] = v
+
+        for idx, metrics in results.get("WAV", {}).items():
+            if idx in self.current_wavelet_events.index:
+                for k, v in metrics.items():
+                    if k == "r_profile":
+                        for col, val in zip(PROFILE_COLS, v):
+                            self.current_wavelet_events.at[idx, col] = val
+                    else:
+                        self.current_wavelet_events.at[idx, k] = v
+
+        x_prof_ar, y_prof_ar = build_profile_curve(self.current_ar_events)
+        if len(x_prof_ar):
+            self.curve_ar_r_profile.setData(x_prof_ar, y_prof_ar)
+
+        x_prof_w, y_prof_w = build_profile_curve(self.current_wavelet_events)
+        if len(x_prof_w):
+            self.curve_r_profile.setData(x_prof_w, y_prof_w)
+
+        if self.current_ar_idx >= 0:
+            self.jump_to_ar_event()
+        elif self.current_wav_idx >= 0:
+            self.jump_to_wav_event()
+
     def draw_spans(self):
         self._remove_span_items()
 
-        # 1. Overlay Wavelet detections (High visibility Cyan, zValue=5)
         if not self.current_wavelet_events.empty:
             for _, row in self.current_wavelet_events.iterrows():
                 s, e = safe_float(row["Start_s"], 0.0), safe_float(row["End_s"], 0.0)
@@ -748,7 +902,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
                     plot.addItem(r_item)
                 self.region_items.append(triple)
 
-        # 2. Overlay AR detections (Red/Orange, zValue=10)
         if not self.current_ar_events.empty:
             for _, row in self.current_ar_events.iterrows():
                 s, e = safe_float(row["Start_s"], 0.0), safe_float(row["End_s"], 0.0)
@@ -765,7 +918,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
                     plot.addItem(r_item)
                 self.region_items.append(triple)
 
-    # ----------------------------------------------------------- Navigation ---
     def on_prev_ar_event(self):
         if len(self.current_ar_events) == 0:
             return
@@ -790,6 +942,20 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.current_wav_idx = (self.current_wav_idx + 1) % len(self.current_wavelet_events)
         self.jump_to_wav_event()
 
+    def _centered_view_range(self, start_s, end_s):
+        total_duration = self.data_len / FS
+        center = (start_s + end_s) / 2.0
+        half = VIEW_WINDOW_SEC / 2.0
+        view_start = center - half
+        view_end = center + half
+        if view_start < 0.0:
+            view_start = 0.0
+            view_end = min(VIEW_WINDOW_SEC, total_duration)
+        if view_end > total_duration:
+            view_end = total_duration
+            view_start = max(0.0, view_end - VIEW_WINDOW_SEC)
+        return view_start, view_end
+
     def jump_to_ar_event(self):
         if self.current_ar_idx < 0 or self.current_ar_idx >= len(self.current_ar_events):
             return
@@ -798,8 +964,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         start_s = safe_float(event["Start_s"], 0.0)
         end_s = safe_float(event["End_s"], 0.0)
 
-        view_start = max(0.0, start_s - VIEW_PADDING_SEC)
-        view_end = min(self.data_len / FS, end_s + VIEW_PADDING_SEC)
+        view_start, view_end = self._centered_view_range(start_s, end_s)
 
         self.p_raw.setXRange(view_start, view_end, padding=0)
         self.p_r.setYRange(0.0, 1.05, padding=0)
@@ -819,13 +984,25 @@ class SpindleViewer(QtWidgets.QMainWindow):
         freq_val = event.get("Peak_Freq_Hz", np.nan)
         dur = end_s - start_s
 
-        info = (
+        lines = [
             f"[Focus: AR Spindle #{self.current_ar_idx + 1}/{len(self.current_ar_events)}] "
-            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)\n"
-            f"AR Metrics: Max R = {fmt(r_val)} | Peak Freq = {fmt(freq_val, '.2f')} Hz\n"
-            f"Alignment Status: {align_desc}"
-        )
-        self.details_panel.setText(info)
+            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)",
+            f"CSV Detection: Max R = {fmt(r_val)} | Peak Freq = {fmt(freq_val, '.2f')} Hz",
+        ]
+
+        live_max = event.get("r_max", np.nan)
+        if not np.isnan(safe_float(live_max)):
+            lines.append(
+                f"Live AR fit: R max={fmt(live_max)} min={fmt(event.get('r_min', np.nan))} "
+                f"mean={fmt(event.get('r_mean', np.nan))} | "
+                f"in_band_ratio={fmt(event.get('in_band_ratio', np.nan), '.2f')} "
+                f"({int(safe_float(event.get('n_windows', 0), 0))} windows)"
+            )
+        elif AR_LIVE_ANALYSIS_AVAILABLE:
+            lines.append("Live AR fit: computing...")
+
+        lines.append(f"Alignment Status: {align_desc}")
+        self.details_panel.setText("\n".join(lines))
         self.lbl_ar_tracker.setText(f"AR: {self.current_ar_idx + 1} / {len(self.current_ar_events)}")
 
     def jump_to_wav_event(self):
@@ -836,8 +1013,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         start_s = safe_float(event["Start_s"], 0.0)
         end_s = safe_float(event["End_s"], 0.0)
 
-        view_start = max(0.0, start_s - VIEW_PADDING_SEC)
-        view_end = min(self.data_len / FS, end_s + VIEW_PADDING_SEC)
+        view_start, view_end = self._centered_view_range(start_s, end_s)
 
         self.p_raw.setXRange(view_start, view_end, padding=0)
         self.p_r.setYRange(0.0, 1.05, padding=0)
@@ -854,12 +1030,24 @@ class SpindleViewer(QtWidgets.QMainWindow):
         )
 
         dur = end_s - start_s
-        info = (
+        lines = [
             f"[Focus: Wavelet Spindle #{self.current_wav_idx + 1}/{len(self.current_wavelet_events)}] "
-            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)\n"
-            f"Alignment Status: {align_desc}"
-        )
-        self.details_panel.setText(info)
+            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)",
+        ]
+
+        live_max = event.get("r_max", np.nan)
+        if not np.isnan(safe_float(live_max)):
+            lines.append(
+                f"Live AR fit: R max={fmt(live_max)} min={fmt(event.get('r_min', np.nan))} "
+                f"mean={fmt(event.get('r_mean', np.nan))} | "
+                f"in_band_ratio={fmt(event.get('in_band_ratio', np.nan), '.2f')} "
+                f"({int(safe_float(event.get('n_windows', 0), 0))} windows)"
+            )
+        elif AR_LIVE_ANALYSIS_AVAILABLE:
+            lines.append("Live AR fit: computing...")
+
+        lines.append(f"Alignment Status: {align_desc}")
+        self.details_panel.setText("\n".join(lines))
         self.lbl_wav_tracker.setText(f"WAV: {self.current_wav_idx + 1} / {len(self.current_wavelet_events)}")
 
 
@@ -868,7 +1056,6 @@ def parse_args():
     parser.add_argument("--manifest", default=DEFAULT_MANIFEST, help="Path to tasks_manifest.csv")
     parser.add_argument("--ar-csv", default=DEFAULT_AR_CSV, help="Path to AR-detected spindles CSV")
     parser.add_argument("--wavelet-csv", default=DEFAULT_WAVELET_CSV, help="Path to wavelet-detected spindles CSV")
-    # Ignore unknown args so this still works fine under Qt's own arg parsing.
     args, _ = parser.parse_known_args()
     return args
 
@@ -894,7 +1081,6 @@ def main():
     app.setPalette(dark_palette)
 
     def excepthook(exc_type, exc_value, exc_tb):
-        # Keep unexpected exceptions from silently killing the Qt event loop.
         traceback.print_exception(exc_type, exc_value, exc_tb)
 
     sys.excepthook = excepthook
