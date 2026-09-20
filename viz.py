@@ -61,52 +61,67 @@ def parse_channel_trial(data_path: str):
     return chan, trial
 
 
-def standardize_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0) -> pd.DataFrame:
+def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0) -> pd.DataFrame:
+    """
+    Scans for possible column names indicating start/end times or sample indices
+    and converts them to seconds (Start_s and End_s).
+    """
     if df.empty:
         return df
 
-    cols = {c.lower(): c for c in df.columns}
-    start_col = None
-    end_col = None
-    is_sample_based = False
+    cols_lower = {str(c).lower().strip(): c for c in df.columns}
 
-    candidates_start = [
+    # Priority-ordered possible headers
+    start_candidates = [
         "start_s", "start_time", "start_sec", "start_secs", "start",
-        "spindle_start", "start_time_s", "start_sample", "start_idx"
+        "start_time_s", "spindle_start", "onset_s", "onset_time",
+        "start_sample", "start_idx", "start_sample_idx", "start_pts"
     ]
-    candidates_end = [
+    end_candidates = [
         "end_s", "end_time", "end_sec", "end_secs", "end",
-        "spindle_end", "end_time_s", "end_sample", "end_idx"
+        "end_time_s", "spindle_end", "offset_s", "offset_time",
+        "end_sample", "end_idx", "end_sample_idx", "end_pts"
     ]
 
-    for cand in candidates_start:
-        if cand in cols:
-            start_col = cols[cand]
-            if "sample" in cand or "idx" in cand:
-                is_sample_based = True
+    found_start = None
+    found_end = None
+
+    for cand in start_candidates:
+        if cand in cols_lower:
+            found_start = cols_lower[cand]
             break
 
-    for cand in candidates_end:
-        if cand in cols:
-            end_col = cols[cand]
+    for cand in end_candidates:
+        if cand in cols_lower:
+            found_end = cols_lower[cand]
             break
 
-    if start_col and end_col:
-        scale = 1.0 / default_fs if is_sample_based else 1.0
-        df["Start_s"] = df[start_col].astype(float) * scale
-        df["End_s"] = df[end_col].astype(float) * scale
+    if found_start and found_end:
+        starts = pd.to_numeric(df[found_start], errors="coerce").fillna(0.0).values
+        ends = pd.to_numeric(df[found_end], errors="coerce").fillna(0.0).values
+
+        # Detect if coordinates are raw sample indices or seconds
+        # Typical recording durations in seconds are rarely > 86400, while sample indices
+        # will quickly exceed thousands.
+        durations = ends - starts
+        median_dur = np.nanmedian(durations) if len(durations) > 0 else 0
+
+        if median_dur > 20.0 or ("sample" in found_start.lower()) or ("idx" in found_start.lower()):
+            df["Start_s"] = starts / default_fs
+            df["End_s"] = ends / default_fs
+        else:
+            df["Start_s"] = starts
+            df["End_s"] = ends
     else:
-        if "Start_s" not in df.columns:
+        # Fallback: check if duration and peak/start are available
+        if "start_s" not in df.columns:
             df["Start_s"] = 0.0
-        if "End_s" not in df.columns:
+        if "end_s" not in df.columns:
             df["End_s"] = 0.0
 
     return df
 
 
-# --------------------------------------------------------------------------- #
-# GUI Application
-# --------------------------------------------------------------------------- #
 class SpindleViewer(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -135,7 +150,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.setCentralWidget(main_widget)
         root_layout = QtWidgets.QVBoxLayout(main_widget)
 
-        # ---------------- Filter & Selection Controls ---------------- #
+        # Dataset Filtering
         filter_box = QtWidgets.QGroupBox("Dataset Filtering")
         filter_layout = QtWidgets.QHBoxLayout()
 
@@ -158,11 +173,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
         filter_box.setLayout(filter_layout)
         root_layout.addWidget(filter_box)
 
-        # ---------------- Unified Navigation Bar ---------------- #
+        # Navigation Bar
         nav_box = QtWidgets.QGroupBox("Detection Navigation")
         nav_layout = QtWidgets.QHBoxLayout()
 
-        # AR Navigation Controls
         self.btn_prev_ar = QtWidgets.QPushButton("◀ Prev AR")
         self.btn_prev_ar.clicked.connect(self.on_prev_ar_event)
         nav_layout.addWidget(self.btn_prev_ar)
@@ -176,9 +190,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.btn_next_ar.clicked.connect(self.on_next_ar_event)
         nav_layout.addWidget(self.btn_next_ar)
 
-        nav_layout.addSpacing(25)
+        nav_layout.addSpacing(30)
 
-        # Wavelet Navigation Controls
         self.btn_prev_wav = QtWidgets.QPushButton("◀ Prev WAV")
         self.btn_prev_wav.clicked.connect(self.on_prev_wav_event)
         nav_layout.addWidget(self.btn_prev_wav)
@@ -193,36 +206,33 @@ class SpindleViewer(QtWidgets.QMainWindow):
         nav_layout.addWidget(self.btn_next_wav)
 
         nav_layout.addSpacing(30)
-        lbl_ar_legend = QtWidgets.QLabel("■ AR Detection")
+        lbl_ar_legend = QtWidgets.QLabel("■ AR Spindle")
         lbl_ar_legend.setStyleSheet("color: #ff3333; font-weight: bold;")
         nav_layout.addWidget(lbl_ar_legend)
 
-        lbl_wav_legend = QtWidgets.QLabel("■ Wavelet Detection")
-        lbl_wav_legend.setStyleSheet("color: #00bcd4; font-weight: bold;")
+        lbl_wav_legend = QtWidgets.QLabel("■ Wavelet Spindle")
+        lbl_wav_legend.setStyleSheet("color: #00e5ff; font-weight: bold;")
         nav_layout.addWidget(lbl_wav_legend)
 
         nav_layout.addStretch(1)
         nav_box.setLayout(nav_layout)
         root_layout.addWidget(nav_box)
 
-        # ---------------- Signal Viewports ---------------- #
+        # Viewports
         pg.setConfigOptions(antialias=False)
         self.graphics_layout = pg.GraphicsLayoutWidget()
         root_layout.addWidget(self.graphics_layout, stretch=1)
 
-        # Row 1: Unfiltered LFP
         self.p_raw = self.graphics_layout.addPlot(row=0, col=0)
         self.p_raw.showGrid(x=True, y=True, alpha=0.3)
         self.p_raw.setLabel("left", "Raw LFP", units="uV")
         self.curve_raw = self.p_raw.plot(pen=pg.mkPen(color="#dcdcdc", width=1))
 
-        # Row 2: 10-15 Hz Filtered LFP
         self.p_filt = self.graphics_layout.addPlot(row=1, col=0)
         self.p_filt.showGrid(x=True, y=True, alpha=0.3)
         self.p_filt.setLabel("left", "10-15 Hz", units="uV")
         self.curve_filt = self.p_filt.plot(pen=pg.mkPen(color="#4db6ac", width=1.2))
 
-        # Row 3: AR Pole Metric (R-value)
         self.p_r = self.graphics_layout.addPlot(row=2, col=0)
         self.p_r.showGrid(x=True, y=True, alpha=0.3)
         self.p_r.setLabel("left", "Max R")
@@ -239,7 +249,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_r.setXLink(self.p_raw)
         self.region_items = []
 
-        # ---------------- Detailed Inspection Panel ---------------- #
+        # Info Box
         self.details_panel = QtWidgets.QTextEdit()
         self.details_panel.setReadOnly(True)
         self.details_panel.setMaximumHeight(90)
@@ -269,7 +279,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.manifest_df["trial"] = parsed.apply(lambda x: clean_str(x[1]))
         self.manifest_df["File"] = self.manifest_df["data_path"].apply(lambda p: Path(p).name)
 
-        # AR Dataset
+        # AR Loading
         if os.path.exists(DEFAULT_AR_CSV):
             self.ar_df = pd.read_csv(DEFAULT_AR_CSV)
             self.ar_df["Rat"] = self.ar_df["Rat"].astype(int)
@@ -277,31 +287,47 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.ar_df["Date"] = self.ar_df["Date"].apply(clean_str)
             if "File" in self.ar_df.columns:
                 self.ar_df["File"] = self.ar_df["File"].apply(lambda p: Path(str(p)).name)
-            self.ar_df = standardize_interval_columns(self.ar_df, FS)
+            self.ar_df = resolve_interval_columns(self.ar_df, FS)
         else:
             self.ar_df = pd.DataFrame()
 
-        # Wavelet Dataset
+        # Wavelet Loading
         if os.path.exists(DEFAULT_WAVELET_CSV):
             self.wavelet_df = pd.read_csv(DEFAULT_WAVELET_CSV)
-            self.wavelet_df = self.wavelet_df.rename(
-                columns={"rat_number": "Rat", "region": "Region", "date": "Date"}
-            )
-            self.wavelet_df["Rat"] = self.wavelet_df["Rat"].astype(int)
-            self.wavelet_df["Region"] = self.wavelet_df["Region"].astype(str).str.strip()
-            self.wavelet_df["Date"] = self.wavelet_df["Date"].apply(clean_str)
 
+            # Normalize headers
+            rename_map = {}
+            for col in self.wavelet_df.columns:
+                clow = col.lower().strip()
+                if clow in ["rat", "rat_number", "rat_id"]:
+                    rename_map[col] = "Rat"
+                elif clow in ["region", "brain_region", "area"]:
+                    rename_map[col] = "Region"
+                elif clow in ["date", "session_date", "day"]:
+                    rename_map[col] = "Date"
+                elif clow in ["channel", "chan", "channel_id"]:
+                    rename_map[col] = "channel"
+                elif clow in ["trial", "trial_id", "recording"]:
+                    rename_map[col] = "trial"
+
+            self.wavelet_df = self.wavelet_df.rename(columns=rename_map)
+
+            if "Rat" in self.wavelet_df.columns:
+                self.wavelet_df["Rat"] = pd.to_numeric(self.wavelet_df["Rat"], errors="coerce").fillna(0).astype(int)
+            if "Region" in self.wavelet_df.columns:
+                self.wavelet_df["Region"] = self.wavelet_df["Region"].astype(str).str.strip()
+            if "Date" in self.wavelet_df.columns:
+                self.wavelet_df["Date"] = self.wavelet_df["Date"].apply(clean_str)
             if "channel" in self.wavelet_df.columns:
                 self.wavelet_df["channel"] = self.wavelet_df["channel"].apply(normalize_channel)
             else:
                 self.wavelet_df["channel"] = ""
-
             if "trial" in self.wavelet_df.columns:
                 self.wavelet_df["trial"] = self.wavelet_df["trial"].apply(clean_str)
             else:
                 self.wavelet_df["trial"] = ""
 
-            self.wavelet_df = standardize_interval_columns(self.wavelet_df, FS)
+            self.wavelet_df = resolve_interval_columns(self.wavelet_df, FS)
         else:
             self.wavelet_df = pd.DataFrame()
 
@@ -404,7 +430,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         # Filter AR detections
         if not self.ar_df.empty:
-            if "File" in self.ar_df.columns:
+            if "File" in self.ar_df.columns and (self.ar_df["File"] == file_name).any():
                 ar_sub = self.ar_df[self.ar_df["File"] == file_name]
             else:
                 ar_sub = self.ar_df[
@@ -420,17 +446,28 @@ class SpindleViewer(QtWidgets.QMainWindow):
         else:
             self.current_ar_events = pd.DataFrame()
 
-        # Filter Wavelet detections
+        # Filter Wavelet detections with graceful fallbacks
         if not self.wavelet_df.empty:
-            wav_sub = self.wavelet_df[
-                (self.wavelet_df["Rat"] == task["Rat"])
-                & (self.wavelet_df["Region"] == task["Region"])
-                & (self.wavelet_df["Date"] == task["Date"])
+            w_df = self.wavelet_df
+
+            # Tier 1: Rat + Region + Date
+            wav_sub = w_df[
+                (w_df["Rat"] == task["Rat"])
+                & (w_df["Region"] == task["Region"])
+                & (w_df["Date"] == task["Date"])
             ]
+
+            # Tier 2: Restrict by Channel if matches exist
             if not wav_sub.empty and task["channel"]:
-                wav_sub = wav_sub[wav_sub["channel"] == task["channel"]]
+                chan_match = wav_sub[wav_sub["channel"] == task["channel"]]
+                if not chan_match.empty:
+                    wav_sub = chan_match
+
+            # Tier 3: Restrict by Trial if present and non-empty
             if not wav_sub.empty and task["trial"]:
-                wav_sub = wav_sub[wav_sub["trial"] == task["trial"]]
+                trial_match = wav_sub[wav_sub["trial"] == task["trial"]]
+                if not trial_match.empty:
+                    wav_sub = trial_match
 
             if not wav_sub.empty and "Start_s" in wav_sub.columns:
                 self.current_wavelet_events = wav_sub.sort_values("Start_s").reset_index(drop=True)
@@ -456,7 +493,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.draw_spans()
 
-        # Update initial navigation indexes
         self.current_ar_idx = 0 if len(self.current_ar_events) > 0 else -1
         self.current_wav_idx = 0 if len(self.current_wavelet_events) > 0 else -1
 
@@ -485,43 +521,46 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.p_r.removeItem(r[2])
         self.region_items.clear()
 
-        # Overlay AR detections (Red/Orange)
-        if not self.current_ar_events.empty:
-            for _, row in self.current_ar_events.iterrows():
-                s, e = float(row["Start_s"]), float(row["End_s"])
-                r1 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(255, 60, 60, 50),
-                                         pen=pg.mkPen(color=(255, 50, 50, 180), width=1.2))
-                r2 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(255, 60, 60, 50),
-                                         pen=pg.mkPen(color=(255, 50, 50, 180), width=1.2))
-                r3 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(255, 60, 60, 50),
-                                         pen=pg.mkPen(color=(255, 50, 50, 180), width=1.2))
-                self.p_raw.addItem(r1)
-                self.p_filt.addItem(r2)
-                self.p_r.addItem(r3)
-                self.region_items.append((r1, r2, r3))
-
-        # Overlay Wavelet detections (Cyan)
+        # 1. Overlay Wavelet detections (High visibility Cyan, zValue=5)
         if not self.current_wavelet_events.empty:
             for _, row in self.current_wavelet_events.iterrows():
                 s, e = float(row["Start_s"]), float(row["End_s"])
                 r1 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(0, 200, 230, 45),
-                                         pen=pg.mkPen(color=(0, 200, 230, 180), width=1.2, style=QtCore.Qt.DashLine))
+                                         brush=QtGui.QColor(0, 229, 255, 90),
+                                         pen=pg.mkPen(color=(0, 229, 255, 230), width=1.8, style=QtCore.Qt.DashLine))
                 r2 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(0, 200, 230, 45),
-                                         pen=pg.mkPen(color=(0, 200, 230, 180), width=1.2, style=QtCore.Qt.DashLine))
+                                         brush=QtGui.QColor(0, 229, 255, 90),
+                                         pen=pg.mkPen(color=(0, 229, 255, 230), width=1.8, style=QtCore.Qt.DashLine))
                 r3 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(0, 200, 230, 45),
-                                         pen=pg.mkPen(color=(0, 200, 230, 180), width=1.2, style=QtCore.Qt.DashLine))
+                                         brush=QtGui.QColor(0, 229, 255, 90),
+                                         pen=pg.mkPen(color=(0, 229, 255, 230), width=1.8, style=QtCore.Qt.DashLine))
+                for r_item in (r1, r2, r3):
+                    r_item.setZValue(5)
                 self.p_raw.addItem(r1)
                 self.p_filt.addItem(r2)
                 self.p_r.addItem(r3)
                 self.region_items.append((r1, r2, r3))
 
-    # ---------------- Navigation Handlers ---------------- #
+        # 2. Overlay AR detections (Red/Orange, zValue=10)
+        if not self.current_ar_events.empty:
+            for _, row in self.current_ar_events.iterrows():
+                s, e = float(row["Start_s"]), float(row["End_s"])
+                r1 = pg.LinearRegionItem([s, e], movable=False,
+                                         brush=QtGui.QColor(255, 50, 50, 80),
+                                         pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5))
+                r2 = pg.LinearRegionItem([s, e], movable=False,
+                                         brush=QtGui.QColor(255, 50, 50, 80),
+                                         pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5))
+                r3 = pg.LinearRegionItem([s, e], movable=False,
+                                         brush=QtGui.QColor(255, 50, 50, 80),
+                                         pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5))
+                for r_item in (r1, r2, r3):
+                    r_item.setZValue(10)
+                self.p_raw.addItem(r1)
+                self.p_filt.addItem(r2)
+                self.p_r.addItem(r3)
+                self.region_items.append((r1, r2, r3))
+
     def on_prev_ar_event(self):
         if len(self.current_ar_events) == 0:
             return
@@ -560,7 +599,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_raw.setXRange(view_start, view_end, padding=0)
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
-        # Wavelet overlap verification
         overlapping = pd.DataFrame()
         if not self.current_wavelet_events.empty:
             w = self.current_wavelet_events
@@ -599,7 +637,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_raw.setXRange(view_start, view_end, padding=0)
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
-        # AR overlap verification
         overlapping = pd.DataFrame()
         if not self.current_ar_events.empty:
             a = self.current_ar_events
