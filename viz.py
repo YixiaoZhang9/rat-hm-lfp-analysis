@@ -7,23 +7,26 @@ LFP, band-passed LFP, and a continuous AR R-value trace dynamically computed
 for the active view window.
 
 Architecture notes:
-  * The AR trace is computed on a background QThread (ARWindowWorker) for the
-    currently visible X range plus a small padding window. Results are echoed
-    back with the range they were computed for; the UI thread discards any
-    result whose requested range no longer matches the current view (stale-
-    result rejection). This prevents the trace from being drawn off-screen
-    when the user pans or jumps during a computation.
+  * AR trace is computed on a background QThread (ARWindowWorker) for the
+    currently visible X range plus a small padding window. The worker echoes
+    back the range it computed for; the UI thread discards any result whose
+    requested range no longer matches the current view (stale-result
+    rejection).
   * The R value recorded per AR window is the magnitude of the pole whose
     frequency is closest to the spindle band center (12.5 Hz). This gives a
     dense, continuous trace. The strict in-band presence is tracked
-    separately as a diagnostic (n_in_band) so users can still see where the
-    AR model actually has energy in the 10-15 Hz band.
+    separately as a diagnostic.
   * Raw / filtered / downsampled signals are sanitized at every stage so a
     single NaN cannot poison every Burg window. r_values is initialized with
     NaN so failures are visible as gaps rather than a misleading flat line.
   * Region-specific upper / lower detection thresholds are drawn as dashed
-    horizontal reference lines on the R trace (T_upper, T_lower) and the
-    Y-axis is never allowed to crop below the upper threshold.
+    horizontal reference lines on the R trace (T_upper, T_lower). They update
+    whenever the Region combo changes and the Y-axis is never allowed to crop
+    below the upper threshold.
+  * Navigation is time-synced: when the user jumps to the next AR event, the
+    Wavelet tracker jumps to whichever of its events is nearest in time to
+    the new view center (and vice versa). Both trackers therefore always
+    describe the same time window on screen.
 """
 
 import argparse
@@ -99,7 +102,8 @@ STALE_TOLERANCE_SEC = 0.5
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
 # Upper / lower AR pole-magnitude thresholds used for spindle detection,
-# per brain region. Drawn as horizontal reference lines on the R trace.
+# per brain region. Drawn as horizontal reference lines on the R trace and
+# re-applied automatically when the Region combo changes.
 REGION_THRESHOLDS = {
     "HPC": {"upper": 0.85, "lower": 0.40},
     "PL":  {"upper": 0.85, "lower": 0.40},
@@ -454,6 +458,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self._ar_signal_thread = None
         self._pending_task = None
 
+        # Suppresses syncing while we ourselves are moving the other tracker,
+        # to prevent runaway cross-recursion between jump handlers.
+        self._syncing_navigation = False
+
         self.view_update_timer = QtCore.QTimer(self)
         self.view_update_timer.setSingleShot(True)
         self.view_update_timer.timeout.connect(self._start_window_computation)
@@ -573,8 +581,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         )
 
         # --- Threshold reference lines --------------------------------- #
-        # Infinite horizontal lines. Their Y values are set per-region by
-        # _refresh_threshold_lines(). They are drawn above the R trace.
         self.line_upper = pg.InfiniteLine(
             angle=0,
             movable=False,
@@ -632,7 +638,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         # --- Details panel --------------------------------------------- #
         self.details_panel = QtWidgets.QTextEdit()
         self.details_panel.setReadOnly(True)
-        self.details_panel.setMaximumHeight(70)
+        self.details_panel.setMaximumHeight(90)
         self.details_panel.setStyleSheet(
             "background-color: #1e1e1e; color: #00e676; "
             "font-family: Monospace; font-size: 12px;"
@@ -641,7 +647,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.status_bar = self.statusBar()
 
-        # --- Shortcuts (modifier-guarded to avoid accidental jumps) ----- #
+        # --- Shortcuts -------------------------------------------------- #
         QtWidgets.QShortcut(
             QtGui.QKeySequence(QtCore.Qt.Key_Left), self, self.on_prev_ar_event
         )
@@ -673,10 +679,16 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.line_upper.setValue(upper)
         self.line_lower.setValue(lower)
 
-        # Extend the R-plot's visible Y range so both threshold lines are
-        # always inside the view.
+        # Rescale Y so the upper threshold is always visible, but preserve
+        # any already-drawn R data. If the trace is present, take the max of
+        # the two so nothing gets cropped.
         ymax = max(1.05, upper * 1.05)
         self.p_r.setYRange(0.0, ymax, padding=0)
+
+        vprint(
+            f"[UI] thresholds set: T_upper={upper:.3f} "
+            f"T_lower={lower:.3f} (region={self.combo_region.currentData()})"
+        )
 
     # --------------------------------------------------------------------- #
     # Data loading
@@ -868,7 +880,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.combo_files.addItem(lbl, userData=orig_idx)
         self.combo_files.blockSignals(False)
 
-        # Reposition the threshold lines for this region.
+        # Reposition the threshold lines for this region *before* loading the
+        # file, so they're correct when the first trace is drawn.
         self._refresh_threshold_lines()
 
         if self.combo_files.count() > 0:
@@ -965,8 +978,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_filt.setData(self.time_vector, self.filtered_signal)
         self.curve_r_continuous.clear()
 
-        upper, _ = self._current_thresholds()
-        self.p_r.setYRange(0.0, max(1.05, upper * 1.05), padding=0)
+        # Make sure threshold lines reflect the current region and the Y
+        # axis accommodates the upper threshold.
+        self._refresh_threshold_lines()
 
         self.draw_spans()
 
@@ -981,10 +995,13 @@ class SpindleViewer(QtWidgets.QMainWindow):
             f"{len(self.current_wavelet_events)}"
         )
 
+        # Time-sync: if AR has detections, jump there and let the sync logic
+        # move the WAV tracker to the nearest-in-time wavelet event. If AR
+        # has none but WAV does, do the reverse.
         if self.current_ar_idx >= 0:
-            self.jump_to_ar_event()
+            self.jump_to_ar_event(sync=True)
         elif self.current_wav_idx >= 0:
-            self.jump_to_wav_event()
+            self.jump_to_wav_event(sync=True)
         else:
             initial_end = min(VIEW_WINDOW_SEC, self.data_duration)
             self.p_raw.setXRange(0, initial_end, padding=0)
@@ -1186,19 +1203,78 @@ class SpindleViewer(QtWidgets.QMainWindow):
             )
 
     # --------------------------------------------------------------------- #
+    # Nearest-event helpers (for time-sync)
+    # --------------------------------------------------------------------- #
+    @staticmethod
+    def _nearest_index(df, center_s):
+        """Index of the row in df whose [Start_s, End_s] is nearest to center_s.
+
+        Distance is measured to the interval (0 if center_s is inside the
+        interval). Returns -1 if df is empty.
+        """
+        if df.empty:
+            return -1
+
+        starts = df["Start_s"].to_numpy(dtype=np.float64)
+        ends = df["End_s"].to_numpy(dtype=np.float64)
+        # Distance from center to the interval [start, end]:
+        # 0 if inside, else distance to nearest endpoint.
+        dist = np.where(
+            center_s < starts, starts - center_s,
+            np.where(center_s > ends, center_s - ends, 0.0),
+        )
+        return int(np.argmin(dist))
+
+    def _sync_other_tracker_to(self, center_s, source):
+        """Move the other detector's current index to its nearest event.
+
+        source is 'ar' or 'wav'. Guards against recursion via
+        self._syncing_navigation.
+        """
+        if self._syncing_navigation:
+            return
+
+        self._syncing_navigation = True
+        try:
+            if source == "ar":
+                if not self.current_wavelet_events.empty:
+                    new_idx = self._nearest_index(
+                        self.current_wavelet_events, center_s
+                    )
+                    if new_idx >= 0:
+                        self.current_wav_idx = new_idx
+                        self.lbl_wav_tracker.setText(
+                            f"WAV: {new_idx + 1} / "
+                            f"{len(self.current_wavelet_events)}"
+                        )
+            else:
+                if not self.current_ar_events.empty:
+                    new_idx = self._nearest_index(
+                        self.current_ar_events, center_s
+                    )
+                    if new_idx >= 0:
+                        self.current_ar_idx = new_idx
+                        self.lbl_ar_tracker.setText(
+                            f"AR: {new_idx + 1} / "
+                            f"{len(self.current_ar_events)}"
+                        )
+        finally:
+            self._syncing_navigation = False
+
+    # --------------------------------------------------------------------- #
     # Navigation
     # --------------------------------------------------------------------- #
     def on_prev_ar_event(self):
         if len(self.current_ar_events) == 0:
             return
         self.current_ar_idx = (self.current_ar_idx - 1) % len(self.current_ar_events)
-        self.jump_to_ar_event()
+        self.jump_to_ar_event(sync=True)
 
     def on_next_ar_event(self):
         if len(self.current_ar_events) == 0:
             return
         self.current_ar_idx = (self.current_ar_idx + 1) % len(self.current_ar_events)
-        self.jump_to_ar_event()
+        self.jump_to_ar_event(sync=True)
 
     def on_prev_wav_event(self):
         if len(self.current_wavelet_events) == 0:
@@ -1206,7 +1282,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.current_wav_idx = (self.current_wav_idx - 1) % len(
             self.current_wavelet_events
         )
-        self.jump_to_wav_event()
+        self.jump_to_wav_event(sync=True)
 
     def on_next_wav_event(self):
         if len(self.current_wavelet_events) == 0:
@@ -1214,7 +1290,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.current_wav_idx = (self.current_wav_idx + 1) % len(
             self.current_wavelet_events
         )
-        self.jump_to_wav_event()
+        self.jump_to_wav_event(sync=True)
 
     def _centered_view_range(self, start_s, end_s):
         center = 0.5 * (start_s + end_s)
@@ -1231,7 +1307,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         return view_start, view_end
 
-    def jump_to_ar_event(self):
+    def jump_to_ar_event(self, sync=False):
         if self.current_ar_idx < 0 or self.current_ar_idx >= len(
             self.current_ar_events
         ):
@@ -1240,6 +1316,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         event = self.current_ar_events.iloc[self.current_ar_idx]
         start_s = safe_float(event["Start_s"], 0.0)
         end_s = safe_float(event["End_s"], 0.0)
+        center_s = 0.5 * (start_s + end_s)
 
         view_start, view_end = self._centered_view_range(start_s, end_s)
         self.p_raw.setXRange(view_start, view_end, padding=0)
@@ -1249,38 +1326,12 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.view_update_timer.start(DEBOUNCE_MS)
 
-        overlapping = pd.DataFrame()
-        if not self.current_wavelet_events.empty:
-            w = self.current_wavelet_events
-            overlapping = w[(w["Start_s"] <= end_s) & (w["End_s"] >= start_s)]
+        if sync:
+            self._sync_other_tracker_to(center_s, source="ar")
 
-        align_desc = (
-            f"ALIGNED: Overlaps with {len(overlapping)} wavelet detection(s)"
-            if len(overlapping) > 0
-            else "ISOLATED: No overlapping wavelet event"
-        )
+        self._update_details_panel_ar(start_s, end_s)
 
-        r_val = event.get("Max_R", np.nan)
-        freq_val = event.get("Peak_Freq_Hz", np.nan)
-
-        self.details_panel.setText(
-            "\n".join(
-                [
-                    f"[Focus: AR Spindle #{self.current_ar_idx + 1}/"
-                    f"{len(self.current_ar_events)}] "
-                    f"Interval: [{start_s:.3f}s - {end_s:.3f}s] "
-                    f"(Duration: {end_s - start_s:.3f}s)",
-                    f"CSV Detection: Max R = {fmt(r_val)} | "
-                    f"Peak Freq = {fmt(freq_val, '.2f')} Hz",
-                    f"Alignment Status: {align_desc}",
-                ]
-            )
-        )
-        self.lbl_ar_tracker.setText(
-            f"AR: {self.current_ar_idx + 1} / {len(self.current_ar_events)}"
-        )
-
-    def jump_to_wav_event(self):
+    def jump_to_wav_event(self, sync=False):
         if self.current_wav_idx < 0 or self.current_wav_idx >= len(
             self.current_wavelet_events
         ):
@@ -1289,6 +1340,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         event = self.current_wavelet_events.iloc[self.current_wav_idx]
         start_s = safe_float(event["Start_s"], 0.0)
         end_s = safe_float(event["End_s"], 0.0)
+        center_s = 0.5 * (start_s + end_s)
 
         view_start, view_end = self._centered_view_range(start_s, end_s)
         self.p_raw.setXRange(view_start, view_end, padding=0)
@@ -1298,28 +1350,111 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.view_update_timer.start(DEBOUNCE_MS)
 
+        if sync:
+            self._sync_other_tracker_to(center_s, source="wav")
+
+        self._update_details_panel_wav(start_s, end_s)
+
+    # --------------------------------------------------------------------- #
+    # Details panel content
+    # --------------------------------------------------------------------- #
+    def _update_details_panel_ar(self, start_s, end_s):
+        """Compose the details panel from the current AR + nearest WAV."""
+        ar_event = self.current_ar_events.iloc[self.current_ar_idx]
+        r_val = ar_event.get("Max_R", np.nan)
+        freq_val = ar_event.get("Peak_Freq_Hz", np.nan)
+
+        # Find wavelet events overlapping the focused AR window.
+        overlapping = pd.DataFrame()
+        if not self.current_wavelet_events.empty:
+            w = self.current_wavelet_events
+            overlapping = w[(w["Start_s"] <= end_s) & (w["End_s"] >= start_s)]
+
+        # Also identify the nearest wavelet event by center distance.
+        nearest_txt = "N/A"
+        if not self.current_wavelet_events.empty:
+            center_s = 0.5 * (start_s + end_s)
+            w_idx = self._nearest_index(self.current_wavelet_events, center_s)
+            w_row = self.current_wavelet_events.iloc[w_idx]
+            ws, we = safe_float(w_row["Start_s"], 0.0), safe_float(w_row["End_s"], 0.0)
+            nearest_txt = (
+                f"#{w_idx + 1} [{ws:.3f}s - {we:.3f}s] "
+                f"(Δcenter={abs(0.5*(ws+we) - center_s):.3f}s)"
+            )
+
+        upper, lower = self._current_thresholds()
+        region = self.combo_region.currentData()
+
+        align_desc = (
+            f"ALIGNED: {len(overlapping)} wavelet event(s) overlap this AR window"
+            if len(overlapping) > 0
+            else "ISOLATED: no overlapping wavelet event"
+        )
+
+        lines = [
+            f"[AR #{self.current_ar_idx + 1}/{len(self.current_ar_events)}] "
+            f"region={region}  T_upper={upper:.2f} T_lower={lower:.2f}",
+            f"  AR interval: [{start_s:.3f}s - {end_s:.3f}s] "
+            f"(Duration: {end_s - start_s:.3f}s)  "
+            f"CSV Max R={fmt(r_val)}  Peak Freq={fmt(freq_val, '.2f')} Hz",
+            f"  Nearest WAV event: {nearest_txt}",
+            f"  Alignment: {align_desc}",
+        ]
+        self.details_panel.setText("\n".join(lines))
+        self.lbl_ar_tracker.setText(
+            f"AR: {self.current_ar_idx + 1} / {len(self.current_ar_events)}"
+        )
+
+    def _update_details_panel_wav(self, start_s, end_s):
+        """Compose the details panel from the current WAV + nearest AR."""
+        ar_event = None
+        nearest_txt = "N/A"
+        if not self.current_ar_events.empty:
+            center_s = 0.5 * (start_s + end_s)
+            a_idx = self._nearest_index(self.current_ar_events, center_s)
+            a_row = self.current_ar_events.iloc[a_idx]
+            as_, ae = safe_float(a_row["Start_s"], 0.0), safe_float(a_row["End_s"], 0.0)
+            nearest_txt = (
+                f"#{a_idx + 1} [{as_:.3f}s - {ae:.3f}s] "
+                f"(Δcenter={abs(0.5*(as_+ae) - center_s):.3f}s)"
+            )
+            ar_event = a_row
+
         overlapping = pd.DataFrame()
         if not self.current_ar_events.empty:
             a = self.current_ar_events
             overlapping = a[(a["Start_s"] <= end_s) & (a["End_s"] >= start_s)]
 
         align_desc = (
-            f"ALIGNED: Overlaps with {len(overlapping)} AR detection(s)"
+            f"ALIGNED: {len(overlapping)} AR event(s) overlap this WAV window"
             if len(overlapping) > 0
-            else "ISOLATED: No overlapping AR event"
+            else "ISOLATED: no overlapping AR event"
         )
 
-        self.details_panel.setText(
-            "\n".join(
-                [
-                    f"[Focus: Wavelet Spindle #{self.current_wav_idx + 1}/"
-                    f"{len(self.current_wavelet_events)}] "
-                    f"Interval: [{start_s:.3f}s - {end_s:.3f}s] "
-                    f"(Duration: {end_s - start_s:.3f}s)",
-                    f"Alignment Status: {align_desc}",
-                ]
+        upper, lower = self._current_thresholds()
+        region = self.combo_region.currentData()
+
+        # If the nearest AR event has CSV metadata, surface it.
+        ar_meta = ""
+        if ar_event is not None:
+            ar_meta = (
+                f"  Nearest AR: Max R={fmt(ar_event.get('Max_R', np.nan))}  "
+                f"Peak Freq={fmt(ar_event.get('Peak_Freq_Hz', np.nan), '.2f')} Hz"
             )
-        )
+
+        lines = [
+            f"[WAV #{self.current_wav_idx + 1}/"
+            f"{len(self.current_wavelet_events)}] "
+            f"region={region}  T_upper={upper:.2f} T_lower={lower:.2f}",
+            f"  WAV interval: [{start_s:.3f}s - {end_s:.3f}s] "
+            f"(Duration: {end_s - start_s:.3f}s)",
+            f"  Nearest AR event: {nearest_txt}",
+            f"  Alignment: {align_desc}",
+        ]
+        if ar_meta:
+            lines.append(ar_meta)
+
+        self.details_panel.setText("\n".join(lines))
         self.lbl_wav_tracker.setText(
             f"WAV: {self.current_wav_idx + 1} / "
             f"{len(self.current_wavelet_events)}"
