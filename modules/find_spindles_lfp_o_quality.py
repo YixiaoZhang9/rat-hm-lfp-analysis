@@ -21,7 +21,6 @@ import statsmodels.api as sm
 from PyQt5 import QtCore, QtGui, QtWidgets
 from scipy.io import loadmat
 from scipy.signal import butter, filtfilt
-from statsmodels.regression.linear_model import burg
 
 # --------------------------------------------------------------------------- #
 # Import Preprocessing Modules
@@ -65,10 +64,10 @@ REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
 class ARWindowWorker(QtCore.QThread):
     """
-    Computes the continuous R-value trace for the given time slice, using
-    the exact same synchronous loop logic from the working single-viewer.
+    Computes the continuous R-value trace for the given time slice.
+    Uses list types for signals to bypass PyQt5's silent dropping of np.ndarray.
     """
-    finished_ok = QtCore.pyqtSignal(object, object)
+    finished_ok = QtCore.pyqtSignal(list, list)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, raw_signal, start_s, end_s, parent=None):
@@ -76,6 +75,11 @@ class ARWindowWorker(QtCore.QThread):
         self.raw_signal = raw_signal
         self.start_s = max(0.0, start_s)
         self.end_s = end_s
+        self._is_cancelled = False
+
+    def cancel(self):
+        """Gracefully aborts the computation loop."""
+        self._is_cancelled = True
 
     def run(self):
         try:
@@ -86,7 +90,7 @@ class ARWindowWorker(QtCore.QThread):
             signal_segment = self.raw_signal[s_idx:e_idx]
 
             if len(signal_segment) == 0:
-                self.finished_ok.emit(np.array([]), np.array([]))
+                self.finished_ok.emit([], [])
                 return
 
             filtered_signal = ar_bandpass_filter(
@@ -96,16 +100,19 @@ class ARWindowWorker(QtCore.QThread):
 
             window_samples = int(AR_WINDOW_SEC * AR_TARGET_FS)
             if len(signal_128) < window_samples:
-                self.finished_ok.emit(np.array([]), np.array([]))
+                self.finished_ok.emit([], [])
                 return
 
             total_windows = len(signal_128) - window_samples + 1
             r_values = np.zeros(total_windows)
 
             for i in range(total_windows):
+                if self._is_cancelled:
+                    return
+
                 window = signal_128[i : i + window_samples]
                 try:
-                    a, _ = burg(
+                    a, _ = sm.regression.linear_model.burg(
                         window, order=AR_ORDER, demean=False
                     )
                     poles = np.roots(np.r_[1, -a])
@@ -122,10 +129,15 @@ class ARWindowWorker(QtCore.QThread):
                 except Exception:
                     pass
 
+            if self._is_cancelled:
+                return
+
             t_vals = self.start_s + np.arange(len(r_values)) / AR_TARGET_FS
 
-            self.finished_ok.emit(t_vals, r_values)
+            # Emit standard python lists to guarantee thread-safe delivery in PyQt5
+            self.finished_ok.emit(t_vals.tolist(), r_values.tolist())
         except Exception as e:
+            traceback.print_exc()
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
@@ -600,7 +612,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.details_panel.setText("No recordings match current Rat and Region filters.")
 
         if self._ar_signal_thread is not None and self._ar_signal_thread.isRunning():
-            self._ar_signal_thread.quit()
+            self._ar_signal_thread.cancel()
             self._ar_signal_thread.wait()
 
         self.view_update_timer.stop()
@@ -732,9 +744,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 f"File: {file_name} | Length: {self.data_len/FS:.1f}s | "
                 f"No spindle detections found for this recording."
             )
-
-        # Force execution immediately after setup, eliminating reliance on X-range change signals
-        QtCore.QTimer.singleShot(100, self._start_window_computation)
+            # Ensure computation runs even if there are no events to jump to
+            self.view_update_timer.start(300)
 
     def _on_xrange_changed(self, _, range_tuple):
         if self.raw_signal is not None:
@@ -759,7 +770,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
             return
 
         if self._ar_signal_thread is not None and self._ar_signal_thread.isRunning():
-            self._ar_signal_thread.quit()
+            self._ar_signal_thread.cancel()
             self._ar_signal_thread.wait()
 
         view_range = self.p_raw.viewRange()[0]
@@ -779,7 +790,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.loading_text.hide()
 
         if len(t_vals) > 0 and len(t_vals) == len(r_vals):
-            self.curve_r_continuous.setData(t_vals, r_vals)
+            # Recast python lists to highly optimized numpy arrays for the PyQtGraph render pipeline
+            self.curve_r_continuous.setData(np.array(t_vals), np.array(r_vals))
 
     def _on_window_computation_failed(self, msg):
         self.spinner_timer.stop()
@@ -874,7 +886,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_raw.setXRange(view_start, view_end, padding=0)
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
-        # Explicit timer trigger in case setXRange was called with an identical view (bypassing sigXRangeChanged)
         self.view_update_timer.start(300)
 
         overlapping = pd.DataFrame()
@@ -915,7 +926,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_raw.setXRange(view_start, view_end, padding=0)
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
-        # Explicit timer trigger in case setXRange was called with an identical view (bypassing sigXRangeChanged)
         self.view_update_timer.start(300)
 
         overlapping = pd.DataFrame()
