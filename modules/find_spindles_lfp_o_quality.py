@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Spindle Alignment Inspector (AR vs Wavelet)
+Spindle Alignment Inspector (AR vs Wavelet) — INSTRUMENTED DEBUG BUILD
 
 Lets you page through detected spindle events from two detectors overlaid on
 the raw LFP, band-passed LFP, and a continuous AR R-value trace dynamically
 computed for the active view window.
+
+This build adds verbose terminal logging at every stage of the AR pipeline
+so we can pinpoint exactly where the trace computation is failing.
 """
 
 import argparse
@@ -32,10 +35,24 @@ PROJECT_ROOT = os.environ.get(
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+MODULES_AVAILABLE = False
+_IMPORT_ERROR = ""
+_ar_bandpass_sig = None
+_ar_downsampling_sig = None
+
 try:
     from modules.ephys_preprocessing import bandpass_filter as ar_bandpass_filter
     from modules.ephys_preprocessing import downsampling as ar_downsampling
+
     MODULES_AVAILABLE = True
+    import inspect
+
+    try:
+        _ar_bandpass_sig = str(inspect.signature(ar_bandpass_filter))
+        _ar_downsampling_sig = str(inspect.signature(ar_downsampling))
+    except Exception as _e:
+        _ar_bandpass_sig = f"<unavailable: {_e}>"
+        _ar_downsampling_sig = f"<unavailable: {_e}>"
 except ImportError as e:
     MODULES_AVAILABLE = False
     _IMPORT_ERROR = str(e)
@@ -44,9 +61,12 @@ except ImportError as e:
 # Paths & Default Configuration
 # --------------------------------------------------------------------------- #
 DEFAULT_MANIFEST = os.environ.get("SPINDLE_MANIFEST", "tasks_manifest.csv")
-DEFAULT_AR_CSV = os.environ.get("SPINDLE_AR_CSV", "results/all_detected_spindles_per_region.csv")
+DEFAULT_AR_CSV = os.environ.get(
+    "SPINDLE_AR_CSV", "results/all_detected_spindles_per_region.csv"
+)
 DEFAULT_WAVELET_CSV = os.environ.get(
-    "SPINDLE_WAVELET_CSV", "results_ar_calibration/wavelet_spindles_with_ar_dynamics.csv"
+    "SPINDLE_WAVELET_CSV",
+    "results_ar_calibration/wavelet_spindles_with_ar_dynamics.csv",
 )
 
 FS = 1000.0
@@ -61,11 +81,21 @@ AR_WINDOW_SEC = 1.0
 
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
+# Global verbose flag (always on for this debug build)
+VERBOSE = True
+
+
+def vprint(*args, **kwargs):
+    if VERBOSE:
+        print(*args, **kwargs, flush=True)
+
 
 def _sanitize(x):
     """Return a float64 numpy array free of NaN/Inf."""
     arr = np.asarray(x, dtype=np.float64)
     if not np.all(np.isfinite(arr)):
+        n_bad = int(np.count_nonzero(~np.isfinite(arr)))
+        vprint(f"    [_sanitize] replacing {n_bad} non-finite sample(s)")
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
     return arr
 
@@ -73,19 +103,9 @@ def _sanitize(x):
 class ARWindowWorker(QtCore.QThread):
     """
     Computes the continuous R-value trace for the given time slice.
-
-    Robustness notes:
-      * Raw / filtered / downsampled signals are sanitized at every stage so
-        a single NaN from the .mat load or filtfilt edge cannot poison every
-        Burg window (which previously produced an all-zero trace that was
-        silently swallowed by `except Exception: pass`).
-      * r_values is initialized with NaN, not 0. Combined with
-        connect="finite" on the curve this makes failures visible as gaps
-        instead of a misleading flat line.
-      * Burg is called with demean=True (the statistically correct default
-        for a bandpassed signal) which avoids near-singular Toeplitz systems.
-      * If every window fails we emit `failed` instead of an all-NaN trace.
+    Heavy instrumentation for debugging.
     """
+
     finished_ok = QtCore.pyqtSignal(list, list)
     failed = QtCore.pyqtSignal(str)
 
@@ -97,53 +117,90 @@ class ARWindowWorker(QtCore.QThread):
         self._is_cancelled = False
 
     def cancel(self):
-        """Gracefully aborts the computation loop."""
         self._is_cancelled = True
 
     def run(self):
+        vprint("\n===== ARWindowWorker.run() ENTERED =====")
+        vprint(
+            f"    start_s={self.start_s:.3f}  end_s={self.end_s:.3f}  "
+            f"raw_len={len(self.raw_signal)}  FS={FS}"
+        )
         try:
             pad = AR_WINDOW_SEC
             s_idx = int(self.start_s * FS)
             e_idx = min(len(self.raw_signal), int((self.end_s + pad) * FS))
+            vprint(f"    s_idx={s_idx}  e_idx={e_idx}")
 
             if s_idx >= e_idx:
+                vprint(f"    >>> BAIL: s_idx ({s_idx}) >= e_idx ({e_idx})")
                 self.finished_ok.emit([], [])
                 return
 
             signal_segment = _sanitize(self.raw_signal[s_idx:e_idx])
+            vprint(
+                f"    segment: n={len(signal_segment)}  "
+                f"min={np.min(signal_segment):.4f}  max={np.max(signal_segment):.4f}  "
+                f"std={np.std(signal_segment):.4f}"
+            )
+
             if len(signal_segment) == 0:
+                vprint("    >>> BAIL: empty segment")
                 self.finished_ok.emit([], [])
                 return
 
             # ---- Stage 1: broad bandpass (0.1-100 Hz) -------------------
+            vprint("    [Stage 1] calling ar_bandpass_filter ...")
             try:
                 filtered_signal = ar_bandpass_filter(
                     signal_segment, lowcut=0.1, highcut=100, fs=FS
                 )
-            except TypeError:
-                # Fall back to positional call in case the module signature
-                # differs from the keyword form we expect.
+                vprint("    [Stage 1] OK with keyword args")
+            except TypeError as te:
+                vprint(
+                    f"    [Stage 1] keyword call failed ({te}); " f"trying positional"
+                )
                 filtered_signal = ar_bandpass_filter(signal_segment, 0.1, 100, FS)
+                vprint("    [Stage 1] OK with positional args")
+
             filtered_signal = _sanitize(filtered_signal)
+            vprint(
+                f"    [Stage 1] filtered: n={len(filtered_signal)}  "
+                f"std={np.std(filtered_signal):.4f}"
+            )
 
             # ---- Stage 2: downsample to 128 Hz ---------------------------
+            vprint("    [Stage 2] calling ar_downsampling ...")
             signal_128 = ar_downsampling(filtered_signal, FS, AR_TARGET_FS)
             signal_128 = _sanitize(signal_128)
+            vprint(
+                f"    [Stage 2] downsampled: n={len(signal_128)}  "
+                f"std={np.std(signal_128):.4f}"
+            )
+            vprint(
+                f"    [Stage 2] expected n≈{(e_idx - s_idx) * AR_TARGET_FS / FS:.0f}"
+            )
 
             window_samples = int(AR_WINDOW_SEC * AR_TARGET_FS)
+            vprint(f"    window_samples={window_samples}")
             if len(signal_128) < window_samples:
+                vprint(
+                    f"    >>> BAIL: signal_128 too short "
+                    f"({len(signal_128)} < {window_samples})"
+                )
                 self.finished_ok.emit([], [])
                 return
 
             total_windows = len(signal_128) - window_samples + 1
-            # NaN (not 0) so failures are distinguishable from real R=0.
+            vprint(f"    total_windows={total_windows}")
             r_values = np.full(total_windows, np.nan, dtype=np.float64)
 
             n_failed = 0
             first_error = None
 
+            vprint("    [Stage 3] Burg loop starting ...")
             for i in range(total_windows):
                 if self._is_cancelled:
+                    vprint("    >>> CANCELLED mid-loop")
                     return
 
                 window = signal_128[i : i + window_samples]
@@ -166,31 +223,55 @@ class ARWindowWorker(QtCore.QThread):
 
                     if len(r_vals) > 0:
                         r_values[i] = float(np.max(r_vals))
+
+                    # Print first 3 windows in detail so we can see the math
+                    if i < 3:
+                        vprint(
+                            f"      window {i}: freqs={np.round(freqs, 3).tolist()}  "
+                            f"R={np.round(np.abs(poles), 4).tolist()}  "
+                            f"r_in_band={np.round(r_vals, 4).tolist()}"
+                        )
                 except Exception as exc:
                     n_failed += 1
                     if first_error is None:
                         first_error = f"{type(exc).__name__}: {exc}"
+                        vprint(f"      window {i}: FIRST ERROR -> {first_error}")
 
             if self._is_cancelled:
+                vprint("    >>> CANCELLED after loop")
                 return
 
-            valid = np.isfinite(r_values).sum()
-            if valid == 0:
+            n_finite = int(np.isfinite(r_values).sum())
+            vprint(
+                f"    [Stage 3] loop done: n_failed={n_failed}  "
+                f"n_finite={n_finite}/{total_windows}"
+            )
+            if n_finite > 0:
+                finite_vals = r_values[np.isfinite(r_values)]
+                vprint(
+                    f"    [Stage 3] R stats: min={finite_vals.min():.4f}  "
+                    f"max={finite_vals.max():.4f}  mean={finite_vals.mean():.4f}"
+                )
+
+            if n_finite == 0:
                 msg = (
                     f"All {total_windows} AR windows failed. "
                     f"First error: {first_error or 'no poles in spindle band'}. "
                     f"Likely cause: NaN/Inf in source signal or statsmodels "
                     f"burg signature mismatch."
                 )
-                print(f"[ARWindowWorker] {msg}", file=sys.stderr)
+                vprint(f"    >>> FAILED: {msg}")
                 self.failed.emit(msg)
                 return
 
             t_vals = self.start_s + np.arange(len(r_values)) / AR_TARGET_FS
-
-            # Emit standard python lists to guarantee thread-safe delivery in PyQt5
+            vprint(
+                f"    >>> EMITTING: n={len(r_values)}  "
+                f"t_range=[{t_vals[0]:.3f}, {t_vals[-1]:.3f}]"
+            )
             self.finished_ok.emit(t_vals.tolist(), r_values.tolist())
         except Exception as e:
+            vprint(f"\n!!! ARWindowWorker EXCEPTION: {type(e).__name__}: {e}")
             traceback.print_exc()
             self.failed.emit(f"{type(e).__name__}: {e}")
 
@@ -253,14 +334,34 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
 
     cols_lower = {str(c).lower().strip(): c for c in df.columns}
     start_candidates = [
-        "start_s", "start_time", "start_sec", "start_secs", "start",
-        "start_time_s", "spindle_start", "onset_s", "onset_time",
-        "start_sample", "start_idx", "start_sample_idx", "start_pts"
+        "start_s",
+        "start_time",
+        "start_sec",
+        "start_secs",
+        "start",
+        "start_time_s",
+        "spindle_start",
+        "onset_s",
+        "onset_time",
+        "start_sample",
+        "start_idx",
+        "start_sample_idx",
+        "start_pts",
     ]
     end_candidates = [
-        "end_s", "end_time", "end_sec", "end_secs", "end",
-        "end_time_s", "spindle_end", "offset_s", "offset_time",
-        "end_sample", "end_idx", "end_sample_idx", "end_pts"
+        "end_s",
+        "end_time",
+        "end_sec",
+        "end_secs",
+        "end",
+        "end_time_s",
+        "spindle_end",
+        "offset_s",
+        "offset_time",
+        "end_sample",
+        "end_idx",
+        "end_sample_idx",
+        "end_pts",
     ]
 
     def find_column(candidates):
@@ -282,7 +383,12 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
         durations = ends - starts
         median_dur = np.nanmedian(durations) if len(durations) > 0 else 0
 
-        if (median_dur > 20.0 or "sample" in found_start.lower() or "idx" in found_start.lower() or "index" in found_start.lower()):
+        if (
+            median_dur > 20.0
+            or "sample" in found_start.lower()
+            or "idx" in found_start.lower()
+            or "index" in found_start.lower()
+        ):
             df["Start_s"] = starts / default_fs
             df["End_s"] = ends / default_fs
         else:
@@ -306,36 +412,52 @@ class SignalLoader(QtCore.QThread):
         self.data_path = data_path
 
     def run(self):
+        vprint(f"\n===== SignalLoader.run() ENTERED: {self.data_path} =====")
         try:
             mat_data = loadmat(self.data_path)
+            keys = [k for k in mat_data.keys() if not k.startswith("__")]
+            vprint(f"    .mat keys: {keys}")
             if "data" not in mat_data:
-                raise KeyError(
-                    f"'.mat' file has no 'data' variable (found: "
-                    f"{[k for k in mat_data.keys() if not k.startswith('__')]})"
-                )
+                raise KeyError(f"'.mat' file has no 'data' variable (found: {keys})")
             raw = mat_data["data"].squeeze().astype(np.float32)
             if raw.ndim != 1:
                 raw = raw.reshape(-1)
+            vprint(f"    raw shape after squeeze: {raw.shape}  dtype={raw.dtype}")
 
-            # Sanitize BEFORE filtering: a single NaN in raw would propagate
-            # through filtfilt and every downstream Burg window.
             n_nan = int(np.count_nonzero(~np.isfinite(raw)))
+            vprint(f"    non-finite samples in raw: {n_nan}")
             if n_nan:
-                print(f"[SignalLoader] sanitizing {n_nan} non-finite sample(s) "
-                      f"in {self.data_path}", file=sys.stderr)
                 raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
 
-            filtered = butter_bandpass_filter(raw, BP_LOW, BP_HIGH, FS).astype(np.float32)
-            filtered = np.nan_to_num(filtered, nan=0.0, posinf=0.0, neginf=0.0)
+            vprint(
+                f"    raw stats: min={raw.min():.3f} max={raw.max():.3f} "
+                f"std={raw.std():.3f} len={len(raw)}"
+            )
 
+            filtered = butter_bandpass_filter(raw, BP_LOW, BP_HIGH, FS).astype(
+                np.float32
+            )
+            filtered = np.nan_to_num(filtered, nan=0.0, posinf=0.0, neginf=0.0)
+            vprint(f"    filtered stats: std={filtered.std():.3f} len={len(filtered)}")
+
+            vprint("    >>> SignalLoader EMITTING")
             self.finished_ok.emit(raw, filtered)
         except Exception as e:
+            vprint(f"!!! SignalLoader EXCEPTION: {type(e).__name__}: {e}")
+            traceback.print_exc()
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class SpindleViewer(QtWidgets.QMainWindow):
     def __init__(self, manifest_path, ar_csv_path, wavelet_csv_path):
         super().__init__()
+        vprint("\n===== SpindleViewer.__init__ =====")
+        vprint(f"    MODULES_AVAILABLE={MODULES_AVAILABLE}")
+        if not MODULES_AVAILABLE:
+            vprint(f"    IMPORT ERROR: {_IMPORT_ERROR}")
+        vprint(f"    ar_bandpass_filter signature: {_ar_bandpass_sig}")
+        vprint(f"    ar_downsampling signature:    {_ar_downsampling_sig}")
+
         self.setWindowTitle("Spindle Alignment Inspector (AR vs Wavelet)")
         self.resize(1500, 950)
 
@@ -482,8 +604,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_r.addItem(self.loading_text)
         self.loading_text.hide()
 
-        # Fixed, sensible initial Y-range for the R trace. Auto-ranging on an
-        # all-NaN trace collapses the axis to [0, 0] and hides the curve.
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
         self.p_filt.setXLink(self.p_raw)
@@ -501,15 +621,21 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.status_bar = self.statusBar()
 
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, self.on_prev_ar_event)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, self.on_next_ar_event)
+        QtWidgets.QShortcut(
+            QtGui.QKeySequence(QtCore.Qt.Key_Left), self, self.on_prev_ar_event
+        )
+        QtWidgets.QShortcut(
+            QtGui.QKeySequence(QtCore.Qt.Key_Right), self, self.on_next_ar_event
+        )
         QtWidgets.QShortcut(QtGui.QKeySequence("W"), self, self.on_next_wav_event)
         QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, self.on_prev_wav_event)
 
         self.p_raw.sigXRangeChanged.connect(self._on_xrange_changed)
 
     def load_data(self):
+        vprint("\n===== load_data =====")
         if not MODULES_AVAILABLE:
+            vprint(f"    MODULES_AVAILABLE=False: {_IMPORT_ERROR}")
             self.details_panel.setText(
                 f"Error: Could not import ephys_preprocessing modules.\n"
                 f"Details: {_IMPORT_ERROR}\n"
@@ -518,6 +644,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
             return
 
         if not os.path.exists(self.manifest_path):
+            vprint(f"    manifest not found: {self.manifest_path}")
             self.details_panel.setText(
                 f"Manifest not found: {self.manifest_path}\n"
                 f"Pass --manifest, or set SPINDLE_MANIFEST, to point at your tasks CSV."
@@ -526,12 +653,20 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         try:
             self.manifest_df = pd.read_csv(self.manifest_path)
+            vprint(
+                f"    manifest loaded: {len(self.manifest_df)} rows, "
+                f"cols={list(self.manifest_df.columns)}"
+            )
         except Exception as e:
+            vprint(f"    manifest read failed: {e}")
             self.details_panel.setText(f"Failed to read manifest CSV: {e}")
             return
 
-        missing = REQUIRED_MANIFEST_COLS - set(c.lower() for c in self.manifest_df.columns)
+        missing = REQUIRED_MANIFEST_COLS - set(
+            c.lower() for c in self.manifest_df.columns
+        )
         if missing:
+            vprint(f"    missing manifest cols: {missing}")
             self.details_panel.setText(
                 f"Manifest is missing required column(s): {sorted(missing)}. "
                 f"Expected at least: {sorted(REQUIRED_MANIFEST_COLS)}"
@@ -543,7 +678,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
         bad_rats = int(rat_numeric.isna().sum())
         if bad_rats:
             self.status_bar.showMessage(
-                f"Warning: dropped {bad_rats} manifest row(s) with a non-numeric 'rat' value.", 8000
+                f"Warning: dropped {bad_rats} manifest row(s) with a non-numeric 'rat' value.",
+                8000,
             )
         self.manifest_df = self.manifest_df.loc[rat_numeric.notna()].copy()
         self.manifest_df["Rat"] = rat_numeric.loc[rat_numeric.notna()].astype(int)
@@ -553,26 +689,43 @@ class SpindleViewer(QtWidgets.QMainWindow):
         parsed = self.manifest_df["data_path"].apply(parse_channel_trial)
         self.manifest_df["channel"] = parsed.apply(lambda x: x[0])
         self.manifest_df["trial"] = parsed.apply(lambda x: clean_str(x[1]))
-        self.manifest_df["File"] = self.manifest_df["data_path"].apply(lambda p: Path(str(p)).name)
+        self.manifest_df["File"] = self.manifest_df["data_path"].apply(
+            lambda p: Path(str(p)).name
+        )
 
         if self.manifest_df.empty:
+            vprint("    manifest empty after filtering")
             self.details_panel.setText("Manifest loaded but contains no usable rows.")
             return
 
+        vprint(f"    loading AR csv: {self.ar_csv_path}")
         self.ar_df = self._load_detection_csv(self.ar_csv_path, kind="AR")
-        self.wavelet_df = self._load_detection_csv(self.wavelet_csv_path, kind="Wavelet", is_wavelet=True)
+        vprint(f"    AR events loaded: {len(self.ar_df)}")
+        vprint(f"    loading Wavelet csv: {self.wavelet_csv_path}")
+        self.wavelet_df = self._load_detection_csv(
+            self.wavelet_csv_path, kind="Wavelet", is_wavelet=True
+        )
+        vprint(f"    Wavelet events loaded: {len(self.wavelet_df)}")
 
         self.populate_rat_selector()
 
     def _load_detection_csv(self, path, kind, is_wavelet=False):
         if not path or not os.path.exists(path):
-            self.status_bar.showMessage(f"{kind} detections CSV not found ({path}); continuing without it.", 8000)
+            vprint(f"    [{kind}] CSV not found: {path}")
+            self.status_bar.showMessage(
+                f"{kind} detections CSV not found ({path}); continuing without it.",
+                8000,
+            )
             return pd.DataFrame()
 
         try:
             df = pd.read_csv(path)
+            vprint(f"    [{kind}] loaded {len(df)} rows, cols={list(df.columns)}")
         except Exception as e:
-            self.status_bar.showMessage(f"Failed to read {kind} CSV ({path}): {e}", 8000)
+            vprint(f"    [{kind}] read failed: {e}")
+            self.status_bar.showMessage(
+                f"Failed to read {kind} CSV ({path}): {e}", 8000
+            )
             return pd.DataFrame()
 
         if is_wavelet:
@@ -590,18 +743,27 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 elif clow in ["trial", "trial_id", "recording"]:
                     rename_map[col] = "trial"
             df = df.rename(columns=rename_map)
+            vprint(f"    [{kind}] renamed cols: {list(df.columns)}")
 
             if "Rat" in df.columns:
-                df["Rat"] = pd.to_numeric(df["Rat"], errors="coerce").fillna(-1).astype(int)
+                df["Rat"] = (
+                    pd.to_numeric(df["Rat"], errors="coerce").fillna(-1).astype(int)
+                )
             if "Region" in df.columns:
                 df["Region"] = df["Region"].astype(str).str.strip()
             if "Date" in df.columns:
                 df["Date"] = df["Date"].apply(clean_str)
-            df["channel"] = df["channel"].apply(normalize_channel) if "channel" in df.columns else ""
+            df["channel"] = (
+                df["channel"].apply(normalize_channel)
+                if "channel" in df.columns
+                else ""
+            )
             df["trial"] = df["trial"].apply(clean_str) if "trial" in df.columns else ""
         else:
             if "Rat" in df.columns:
-                df["Rat"] = pd.to_numeric(df["Rat"], errors="coerce").fillna(-1).astype(int)
+                df["Rat"] = (
+                    pd.to_numeric(df["Rat"], errors="coerce").fillna(-1).astype(int)
+                )
             if "Region" in df.columns:
                 df["Region"] = df["Region"].astype(str).str.strip()
             if "Date" in df.columns:
@@ -610,15 +772,21 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 df["File"] = df["File"].apply(lambda p: Path(str(p)).name)
 
         df, resolved = resolve_interval_columns(df, FS)
+        vprint(
+            f"    [{kind}] interval columns resolved={resolved}; "
+            f"Start_s/End_s present={'Start_s' in df.columns and 'End_s' in df.columns}"
+        )
         if not df.empty and not resolved:
             self.status_bar.showMessage(
                 f"Warning: couldn't find start/end time columns in {kind} CSV; "
-                f"events from it will not be positioned correctly.", 10000
+                f"events from it will not be positioned correctly.",
+                10000,
             )
         return df
 
     def populate_rat_selector(self):
         rats = sorted(self.manifest_df["Rat"].unique().tolist())
+        vprint(f"\n===== populate_rat_selector: rats={rats} =====")
         self.combo_rat.blockSignals(True)
         self.combo_rat.clear()
         for r in rats:
@@ -630,10 +798,11 @@ class SpindleViewer(QtWidgets.QMainWindow):
     def on_rat_changed(self, index):
         if index < 0 or self.manifest_df is None:
             return
-
         selected_rat = self.combo_rat.currentData()
+        vprint(f"\n===== on_rat_changed: rat={selected_rat} =====")
         sub = self.manifest_df[self.manifest_df["Rat"] == selected_rat]
         regions = sorted(sub["Region"].unique().tolist())
+        vprint(f"    regions={regions}")
 
         self.combo_region.blockSignals(True)
         self.combo_region.clear()
@@ -649,13 +818,16 @@ class SpindleViewer(QtWidgets.QMainWindow):
     def on_region_changed(self, index):
         if index < 0 or self.manifest_df is None:
             return
-
         selected_rat = self.combo_rat.currentData()
         selected_region = self.combo_region.currentData()
+        vprint(
+            f"\n===== on_region_changed: rat={selected_rat} region={selected_region} ====="
+        )
         matched = self.manifest_df[
             (self.manifest_df["Rat"] == selected_rat)
             & (self.manifest_df["Region"] == selected_region)
         ]
+        vprint(f"    matched files: {len(matched)}")
 
         self.combo_files.blockSignals(True)
         self.combo_files.clear()
@@ -678,7 +850,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.current_wavelet_events = pd.DataFrame()
         self.lbl_ar_tracker.setText("AR: 0 / 0")
         self.lbl_wav_tracker.setText("WAV: 0 / 0")
-        self.details_panel.setText("No recordings match current Rat and Region filters.")
+        self.details_panel.setText(
+            "No recordings match current Rat and Region filters."
+        )
 
         if self._ar_signal_thread is not None and self._ar_signal_thread.isRunning():
             self._ar_signal_thread.cancel()
@@ -700,15 +874,19 @@ class SpindleViewer(QtWidgets.QMainWindow):
     def on_file_selected(self, index):
         if index < 0 or self.manifest_df is None or self.combo_files.count() == 0:
             return
-
         manifest_idx = self.combo_files.itemData(index)
         if manifest_idx is None or manifest_idx not in self.manifest_df.index:
             return
-
         task = self.manifest_df.loc[manifest_idx]
         data_path = task["data_path"]
+        vprint(f"\n===== on_file_selected: {data_path} =====")
+        vprint(
+            f"    task Rat={task['Rat']} Region={task['Region']} "
+            f"Date={task['Date']} channel={task['channel']} trial={task['trial']}"
+        )
 
         if not os.path.exists(data_path):
+            vprint(f"    FILE MISSING: {data_path}")
             self.details_panel.setText(f"File missing on disk: {data_path}")
             return
 
@@ -727,12 +905,15 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self._loader_thread.start()
 
     def _on_signal_load_failed(self, message):
+        vprint(f"\n!!! _on_signal_load_failed: {message}")
         QtWidgets.QApplication.restoreOverrideCursor()
         self.combo_files.setEnabled(True)
         self.status_bar.clearMessage()
         self.details_panel.setText(f"Signal processing error: {message}")
 
     def _on_signal_loaded(self, raw_signal, filtered_signal):
+        vprint("\n===== _on_signal_loaded =====")
+        vprint(f"    raw len={len(raw_signal)}  filtered len={len(filtered_signal)}")
         QtWidgets.QApplication.restoreOverrideCursor()
         self.combo_files.setEnabled(True)
         self.status_bar.clearMessage()
@@ -758,10 +939,13 @@ class SpindleViewer(QtWidgets.QMainWindow):
                     & (self.ar_df["Date"] == task["Date"])
                 ]
             self.current_ar_events = (
-                ar_sub.sort_values("Start_s").reset_index(drop=True) if not ar_sub.empty else pd.DataFrame()
+                ar_sub.sort_values("Start_s").reset_index(drop=True)
+                if not ar_sub.empty
+                else pd.DataFrame()
             )
         else:
             self.current_ar_events = pd.DataFrame()
+        vprint(f"    AR events for this file: {len(self.current_ar_events)}")
 
         if not self.wavelet_df.empty:
             w_df = self.wavelet_df
@@ -770,27 +954,26 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 & (w_df["Region"] == task["Region"])
                 & (w_df["Date"] == task["Date"])
             ]
-
             if not wav_sub.empty and task["channel"]:
                 chan_match = wav_sub[wav_sub["channel"] == task["channel"]]
                 if not chan_match.empty:
                     wav_sub = chan_match
-
             if not wav_sub.empty and task["trial"]:
                 trial_match = wav_sub[wav_sub["trial"] == task["trial"]]
                 if not trial_match.empty:
                     wav_sub = trial_match
-
             self.current_wavelet_events = (
-                wav_sub.sort_values("Start_s").reset_index(drop=True) if not wav_sub.empty else pd.DataFrame()
+                wav_sub.sort_values("Start_s").reset_index(drop=True)
+                if not wav_sub.empty
+                else pd.DataFrame()
             )
         else:
             self.current_wavelet_events = pd.DataFrame()
+        vprint(f"    Wavelet events for this file: {len(self.current_wavelet_events)}")
 
         self.curve_raw.setData(self.time_vector, self.raw_signal)
         self.curve_filt.setData(self.time_vector, self.filtered_signal)
         self.curve_r_continuous.clear()
-        # Reset the Y-range for the new recording.
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
         self.draw_spans()
@@ -815,7 +998,335 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 f"File: {file_name} | Length: {self.data_len/FS:.1f}s | "
                 f"No spindle detections found for this recording."
             )
-            # Ensure computation runs even if there are no events to jump to
             self.view_update_timer.start(300)
 
-    def _on_xrange_changed(self
+    def _on_xrange_changed(self, _, range_tuple):
+        vprint(f"\n===== _on_xrange_changed: {range_tuple} =====")
+        if self.raw_signal is not None:
+            self.view_update_timer.start(300)
+
+    def _update_spinner(self):
+        self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_frames)
+        frame = self.spinner_frames[self.spinner_idx]
+        self.loading_text.setText(f"Calculating R-values {frame}")
+
+        view_range = self.p_r.viewRange()
+        cx = (view_range[0][0] + view_range[0][1]) / 2.0
+        cy = (view_range[1][0] + view_range[1][1]) / 2.0
+        if view_range[1][0] == 0.0 and view_range[1][1] == 1.0:
+            cy = 0.5
+        self.loading_text.setPos(cx, cy)
+
+    def _start_window_computation(self):
+        vprint("\n===== _start_window_computation CALLED =====")
+        vprint(f"    MODULES_AVAILABLE={MODULES_AVAILABLE}")
+        vprint(f"    raw_signal is None: {self.raw_signal is None}")
+        if not MODULES_AVAILABLE or self.raw_signal is None:
+            vprint("    >>> BAIL: modules unavailable or no signal")
+            return
+
+        if self._ar_signal_thread is not None and self._ar_signal_thread.isRunning():
+            vprint("    >>> cancelling previous thread")
+            self._ar_signal_thread.cancel()
+            self._ar_signal_thread.wait()
+
+        view_range = self.p_raw.viewRange()[0]
+        start_s, end_s = view_range[0], view_range[1]
+        vprint(
+            f"    view range: [{start_s:.3f}, {end_s:.3f}]  data_len={self.data_len} "
+            f"(total {self.data_len/FS:.2f}s)"
+        )
+
+        self.loading_text.show()
+        self.spinner_timer.start(100)
+        self.curve_r_continuous.clear()
+
+        self._ar_signal_thread = ARWindowWorker(
+            self.raw_signal, start_s, end_s, parent=self
+        )
+        self._ar_signal_thread.finished_ok.connect(self._on_window_computation_ready)
+        self._ar_signal_thread.failed.connect(self._on_window_computation_failed)
+        self._ar_signal_thread.start()
+        vprint("    >>> worker thread started")
+
+    def _on_window_computation_ready(self, t_vals, r_vals):
+        vprint("\n===== _on_window_computation_ready =====")
+        vprint(f"    len(t_vals)={len(t_vals)}  len(r_vals)={len(r_vals)}")
+        self.spinner_timer.stop()
+        self.loading_text.hide()
+
+        if len(t_vals) > 0 and len(t_vals) == len(r_vals):
+            t_arr = np.asarray(t_vals, dtype=np.float64)
+            r_arr = np.asarray(r_vals, dtype=np.float64)
+            vprint(f"    t range: [{t_arr[0]:.3f}, {t_arr[-1]:.3f}]")
+            finite = r_arr[np.isfinite(r_arr)]
+            vprint(f"    r finite count: {finite.size} / {r_arr.size}")
+            if finite.size > 0:
+                vprint(
+                    f"    r min={finite.min():.4f} max={finite.max():.4f} "
+                    f"mean={finite.mean():.4f}"
+                )
+            self.curve_r_continuous.setData(t_arr, r_arr)
+            ymax = (
+                max(1.05, float(np.nanmax(finite)) * 1.05) if finite.size > 0 else 1.05
+            )
+            self.p_r.setYRange(0.0, ymax, padding=0)
+            vprint(f"    >>> setData called. ymax={ymax}")
+            vprint(f"    p_r view range: {self.p_r.viewRange()}")
+            xdata, ydata = self.curve_r_continuous.getData()
+            vprint(
+                f"    curve data: x_len={len(xdata) if xdata is not None else 0} "
+                f"y_len={len(ydata) if ydata is not None else 0}"
+            )
+            if xdata is not None and len(xdata) > 0:
+                vprint(f"    curve x range: [{xdata[0]:.3f}, {xdata[-1]:.3f}]")
+        else:
+            vprint("    >>> SKIPPED setData: length mismatch or empty")
+
+    def _on_window_computation_failed(self, msg):
+        vprint(f"\n===== AR COMPUTATION FAILED =====\n    {msg}")
+        self.spinner_timer.stop()
+        self.loading_text.hide()
+        self.status_bar.showMessage(f"AR computation failed: {msg}", 12000)
+
+    def draw_spans(self):
+        self._remove_span_items()
+
+        if not self.current_wavelet_events.empty:
+            for _, row in self.current_wavelet_events.iterrows():
+                s, e = safe_float(row["Start_s"], 0.0), safe_float(row["End_s"], 0.0)
+                triple = tuple(
+                    pg.LinearRegionItem(
+                        [s, e],
+                        movable=False,
+                        brush=QtGui.QColor(0, 229, 255, 90),
+                        pen=pg.mkPen(
+                            color=(0, 229, 255, 230),
+                            width=1.8,
+                            style=QtCore.Qt.DashLine,
+                        ),
+                    )
+                    for _ in range(3)
+                )
+                for r_item, plot in zip(triple, self._span_plots):
+                    r_item.setZValue(5)
+                    plot.addItem(r_item)
+                self.region_items.append(triple)
+
+        if not self.current_ar_events.empty:
+            for _, row in self.current_ar_events.iterrows():
+                s, e = safe_float(row["Start_s"], 0.0), safe_float(row["End_s"], 0.0)
+                triple = tuple(
+                    pg.LinearRegionItem(
+                        [s, e],
+                        movable=False,
+                        brush=QtGui.QColor(255, 50, 50, 80),
+                        pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5),
+                    )
+                    for _ in range(3)
+                )
+                for r_item, plot in zip(triple, self._span_plots):
+                    r_item.setZValue(10)
+                    plot.addItem(r_item)
+                self.region_items.append(triple)
+
+    def on_prev_ar_event(self):
+        if len(self.current_ar_events) == 0:
+            return
+        self.current_ar_idx = (self.current_ar_idx - 1) % len(self.current_ar_events)
+        self.jump_to_ar_event()
+
+    def on_next_ar_event(self):
+        if len(self.current_ar_events) == 0:
+            return
+        self.current_ar_idx = (self.current_ar_idx + 1) % len(self.current_ar_events)
+        self.jump_to_ar_event()
+
+    def on_prev_wav_event(self):
+        if len(self.current_wavelet_events) == 0:
+            return
+        self.current_wav_idx = (self.current_wav_idx - 1) % len(
+            self.current_wavelet_events
+        )
+        self.jump_to_wav_event()
+
+    def on_next_wav_event(self):
+        if len(self.current_wavelet_events) == 0:
+            return
+        self.current_wav_idx = (self.current_wav_idx + 1) % len(
+            self.current_wavelet_events
+        )
+        self.jump_to_wav_event()
+
+    def _centered_view_range(self, start_s, end_s):
+        total_duration = self.data_len / FS
+        center = (start_s + end_s) / 2.0
+        half = VIEW_WINDOW_SEC / 2.0
+        view_start = center - half
+        view_end = center + half
+
+        if view_start < 0.0:
+            view_start = 0.0
+            view_end = min(VIEW_WINDOW_SEC, total_duration)
+        if view_end > total_duration:
+            view_end = total_duration
+            view_start = max(0.0, view_end - VIEW_WINDOW_SEC)
+
+        return view_start, view_end
+
+    def jump_to_ar_event(self):
+        if self.current_ar_idx < 0 or self.current_ar_idx >= len(
+            self.current_ar_events
+        ):
+            return
+
+        event = self.current_ar_events.iloc[self.current_ar_idx]
+        start_s = safe_float(event["Start_s"], 0.0)
+        end_s = safe_float(event["End_s"], 0.0)
+
+        view_start, view_end = self._centered_view_range(start_s, end_s)
+        vprint(
+            f"\n===== jump_to_ar_event #{self.current_ar_idx}: "
+            f"event [{start_s:.3f}, {end_s:.3f}] -> view [{view_start:.3f}, {view_end:.3f}]"
+        )
+
+        self.p_raw.setXRange(view_start, view_end, padding=0)
+        self.p_r.setYRange(0.0, 1.05, padding=0)
+
+        self.view_update_timer.start(300)
+
+        overlapping = pd.DataFrame()
+        if not self.current_wavelet_events.empty:
+            w = self.current_wavelet_events
+            overlapping = w[(w["Start_s"] <= end_s) & (w["End_s"] >= start_s)]
+
+        align_desc = (
+            f"ALIGNED: Overlaps with {len(overlapping)} wavelet detection(s)"
+            if len(overlapping) > 0
+            else "ISOLATED: No overlapping wavelet event"
+        )
+
+        r_val = event.get("Max_R", np.nan)
+        freq_val = event.get("Peak_Freq_Hz", np.nan)
+        dur = end_s - start_s
+
+        lines = [
+            f"[Focus: AR Spindle #{self.current_ar_idx + 1}/{len(self.current_ar_events)}] "
+            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)",
+            f"CSV Detection: Max R = {fmt(r_val)} | Peak Freq = {fmt(freq_val, '.2f')} Hz",
+            f"Alignment Status: {align_desc}",
+        ]
+
+        self.details_panel.setText("\n".join(lines))
+        self.lbl_ar_tracker.setText(
+            f"AR: {self.current_ar_idx + 1} / {len(self.current_ar_events)}"
+        )
+
+    def jump_to_wav_event(self):
+        if self.current_wav_idx < 0 or self.current_wav_idx >= len(
+            self.current_wavelet_events
+        ):
+            return
+
+        event = self.current_wavelet_events.iloc[self.current_wav_idx]
+        start_s = safe_float(event["Start_s"], 0.0)
+        end_s = safe_float(event["End_s"], 0.0)
+
+        view_start, view_end = self._centered_view_range(start_s, end_s)
+        vprint(
+            f"\n===== jump_to_wav_event #{self.current_wav_idx}: "
+            f"event [{start_s:.3f}, {end_s:.3f}] -> view [{view_start:.3f}, {view_end:.3f}]"
+        )
+
+        self.p_raw.setXRange(view_start, view_end, padding=0)
+        self.p_r.setYRange(0.0, 1.05, padding=0)
+
+        self.view_update_timer.start(300)
+
+        overlapping = pd.DataFrame()
+        if not self.current_ar_events.empty:
+            a = self.current_ar_events
+            overlapping = a[(a["Start_s"] <= end_s) & (a["End_s"] >= start_s)]
+
+        align_desc = (
+            f"ALIGNED: Overlaps with {len(overlapping)} AR detection(s)"
+            if len(overlapping) > 0
+            else "ISOLATED: No overlapping AR event"
+        )
+
+        dur = end_s - start_s
+        lines = [
+            f"[Focus: Wavelet Spindle #{self.current_wav_idx + 1}/{len(self.current_wavelet_events)}] "
+            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)",
+            f"Alignment Status: {align_desc}",
+        ]
+
+        self.details_panel.setText("\n".join(lines))
+        self.lbl_wav_tracker.setText(
+            f"WAV: {self.current_wav_idx + 1} / {len(self.current_wavelet_events)}"
+        )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Spindle Alignment Inspector (AR vs Wavelet) — DEBUG"
+    )
+    parser.add_argument(
+        "--manifest", default=DEFAULT_MANIFEST, help="Path to tasks_manifest.csv"
+    )
+    parser.add_argument(
+        "--ar-csv", default=DEFAULT_AR_CSV, help="Path to AR-detected spindles CSV"
+    )
+    parser.add_argument(
+        "--wavelet-csv",
+        default=DEFAULT_WAVELET_CSV,
+        help="Path to wavelet-detected spindles CSV",
+    )
+    args, _ = parser.parse_known_args()
+    return args
+
+
+def main():
+    args = parse_args()
+    vprint("=" * 70)
+    vprint("Spindle Alignment Inspector — DEBUG BUILD")
+    vprint("=" * 70)
+    vprint(f"manifest    = {args.manifest}")
+    vprint(f"ar_csv      = {args.ar_csv}")
+    vprint(f"wavelet_csv = {args.wavelet_csv}")
+    vprint(f"MODULES_AVAILABLE = {MODULES_AVAILABLE}")
+    if not MODULES_AVAILABLE:
+        vprint(f"IMPORT_ERROR = {_IMPORT_ERROR}")
+    vprint(f"ar_bandpass_filter signature = {_ar_bandpass_sig}")
+    vprint(f"ar_downsampling signature    = {_ar_downsampling_sig}")
+    vprint("=" * 70)
+
+    app = QtWidgets.QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    dark_palette = QtGui.QPalette()
+    dark_palette.setColor(QtGui.QPalette.Window, QtGui.QColor(40, 40, 40))
+    dark_palette.setColor(QtGui.QPalette.WindowText, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.Base, QtGui.QColor(25, 25, 25))
+    dark_palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor(40, 40, 40))
+    dark_palette.setColor(QtGui.QPalette.ToolTipBase, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.ToolTipText, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.Text, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.Button, QtGui.QColor(50, 50, 50))
+    dark_palette.setColor(QtGui.QPalette.ButtonText, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor(0, 188, 212))
+    dark_palette.setColor(QtGui.QPalette.HighlightedText, QtCore.Qt.black)
+    app.setPalette(dark_palette)
+
+    def excepthook(exc_type, exc_value, exc_tb):
+        traceback.print_exception(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = excepthook
+
+    viewer = SpindleViewer(args.manifest, args.ar_csv, args.wavelet_csv)
+    viewer.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
