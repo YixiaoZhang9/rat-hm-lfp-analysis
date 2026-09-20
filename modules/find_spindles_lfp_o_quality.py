@@ -21,6 +21,7 @@ import statsmodels.api as sm
 from PyQt5 import QtCore, QtGui, QtWidgets
 from scipy.io import loadmat
 from scipy.signal import butter, filtfilt
+from statsmodels.regression.linear_model import burg  # Fix: explicitly import burg
 
 # --------------------------------------------------------------------------- #
 # Import Preprocessing Modules
@@ -67,7 +68,8 @@ class ARWindowWorker(QtCore.QThread):
     Computes the continuous R-value trace for the given time slice, using
     the exact same synchronous loop logic from the working single-viewer.
     """
-    finished_ok = QtCore.pyqtSignal(np.ndarray, np.ndarray)
+    # Fix: Use 'object' to prevent PyQt from silently dropping unregistered np.ndarray signals
+    finished_ok = QtCore.pyqtSignal(object, object)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, raw_signal, start_s, end_s, parent=None):
@@ -108,7 +110,8 @@ class ARWindowWorker(QtCore.QThread):
             for i in range(total_windows):
                 window = signal_128[i : i + window_samples]
                 try:
-                    a, _ = sm.regression.linear_model.burg(
+                    # Fix: use explicitly imported burg function
+                    a, _ = burg(
                         window, order=AR_ORDER, demean=False
                     )
                     poles = np.roots(np.r_[1, -a])
@@ -236,7 +239,8 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
 
 
 class SignalLoader(QtCore.QThread):
-    finished_ok = QtCore.pyqtSignal(np.ndarray, np.ndarray)
+    # Fix: Use 'object' to prevent PyQt from silently dropping unregistered np.ndarray signals
+    finished_ok = QtCore.pyqtSignal(object, object)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, data_path, parent=None):
