@@ -3,8 +3,8 @@
 Spindle Alignment Inspector (AR vs Wavelet)
 
 Lets you page through detected spindle events from two detectors overlaid on
-the raw LFP, band-passed LFP, and a continuous AR R-value trace for a given
-rat / region / recording.
+the raw LFP, band-passed LFP, and a continuous AR R-value trace dynamically
+computed for the active view window.
 """
 
 import argparse
@@ -54,7 +54,7 @@ DEFAULT_WAVELET_CSV = os.environ.get(
 FS = 1000.0
 BP_LOW = 10.0
 BP_HIGH = 15.0
-VIEW_WINDOW_SEC = 10.0  # View window constrained to 10 seconds
+VIEW_WINDOW_SEC = 10.0
 
 AR_TARGET_FS = 128
 AR_ORDER = 8
@@ -65,22 +65,34 @@ AR_STRIDE_SAMPLES = 4
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
 
-class ARFullSignalWorker(QtCore.QThread):
-    """Computes the continuous R-value trace across the entire recording."""
+class ARWindowWorker(QtCore.QThread):
+    """Computes the continuous R-value trace only for the given time slice."""
     finished_ok = QtCore.pyqtSignal(np.ndarray, np.ndarray)
     failed = QtCore.pyqtSignal(str)
 
-    def __init__(self, raw_signal, parent=None):
+    def __init__(self, raw_signal, start_s, end_s, parent=None):
         super().__init__(parent)
         self.raw_signal = raw_signal
+        self.start_s = start_s
+        self.end_s = end_s
 
     def run(self):
         try:
-            filtered = ar_bandpass_filter(self.raw_signal, lowcut=0.1, highcut=100, fs=FS)
+            # Add padding to ensure edge windows calculate correctly
+            pad = AR_WINDOW_SEC
+            s_idx = max(0, int((self.start_s - pad) * FS))
+            e_idx = min(len(self.raw_signal), int((self.end_s + pad) * FS))
+            chunk = self.raw_signal[s_idx:e_idx]
+
+            if len(chunk) == 0:
+                self.finished_ok.emit(np.array([]), np.array([]))
+                return
+
+            filtered = ar_bandpass_filter(chunk, lowcut=0.1, highcut=100, fs=FS)
             signal_128 = ar_downsampling(filtered, FS, AR_TARGET_FS)
 
-            n_jobs = max(1, os.cpu_count() - 1)
-
+            # Force n_jobs=1: multiprocessing is slower for tiny array chunks
+            # due to serialization overhead.
             r_vals, _, starts = fit_ar_on_prepared_signal(
                 signal_128,
                 target_fs=AR_TARGET_FS,
@@ -88,13 +100,13 @@ class ARFullSignalWorker(QtCore.QThread):
                 window_sec=AR_WINDOW_SEC,
                 stride_samples=AR_STRIDE_SAMPLES,
                 spindle_band=AR_SPINDLE_BAND,
-                n_jobs=n_jobs,
+                n_jobs=1,
                 verbose=False
             )
 
-            # Map start sample indices to the time vector (centered on the window)
+            chunk_start_t = s_idx / FS
             half_win = int(AR_WINDOW_SEC * AR_TARGET_FS) / 2.0
-            t_vals = (starts + half_win) / AR_TARGET_FS
+            t_vals = chunk_start_t + (starts + half_win) / AR_TARGET_FS
 
             self.finished_ok.emit(t_vals, r_vals)
         except Exception as e:
@@ -256,6 +268,17 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self._ar_signal_thread = None
         self._pending_task = None
 
+        # Debouncer for window panning
+        self.view_update_timer = QtCore.QTimer()
+        self.view_update_timer.setSingleShot(True)
+        self.view_update_timer.timeout.connect(self._start_window_computation)
+
+        # Spinner animation
+        self.spinner_timer = QtCore.QTimer()
+        self.spinner_timer.timeout.connect(self._update_spinner)
+        self.spinner_frames = ["|", "/", "-", "\\"]
+        self.spinner_idx = 0
+
         self.init_ui()
         self.load_data()
 
@@ -326,7 +349,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         lbl_wav_legend.setStyleSheet("color: #00e5ff; font-weight: bold;")
         nav_layout.addWidget(lbl_wav_legend)
 
-        lbl_continuous_legend = QtWidgets.QLabel("— Continuous AR R-Value")
+        lbl_continuous_legend = QtWidgets.QLabel("— Live AR R-Value")
         lbl_continuous_legend.setStyleSheet("color: #ffab40; font-weight: bold;")
         nav_layout.addWidget(lbl_continuous_legend)
 
@@ -354,9 +377,17 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_r.setLabel("bottom", "Time", units="s")
 
         self.curve_r_continuous = self.p_r.plot(
-            pen=pg.mkPen(color="#ffab40", width=1.5),
+            pen=pg.mkPen(color="#ffab40", width=2),
             connect="finite",
         )
+
+        # Loading Spinner Text
+        self.loading_text = pg.TextItem("", color=(255, 171, 64), anchor=(0.5, 0.5))
+        font = QtGui.QFont()
+        font.setBold(True)
+        self.loading_text.setFont(font)
+        self.p_r.addItem(self.loading_text)
+        self.loading_text.hide()
 
         self.p_filt.setXLink(self.p_raw)
         self.p_r.setXLink(self.p_raw)
@@ -377,6 +408,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, self.on_next_ar_event)
         QtWidgets.QShortcut(QtGui.QKeySequence("W"), self, self.on_next_wav_event)
         QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, self.on_prev_wav_event)
+
+        # Connect view change to debounce timer
+        self.p_raw.sigXRangeChanged.connect(self._on_xrange_changed)
 
     def load_data(self):
         if not os.path.exists(self.manifest_path):
@@ -606,7 +640,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         file_name = task["File"]
 
-        # Prepare AR DataFrame
         if not self.ar_df.empty:
             if "File" in self.ar_df.columns and (self.ar_df["File"] == file_name).any():
                 ar_sub = self.ar_df[self.ar_df["File"] == file_name]
@@ -622,7 +655,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         else:
             self.current_ar_events = pd.DataFrame()
 
-        # Prepare Wavelet DataFrame
         if not self.wavelet_df.empty:
             w_df = self.wavelet_df
             wav_sub = w_df[
@@ -663,8 +695,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
             f"WAV: {max(0, self.current_wav_idx + 1)} / {len(self.current_wavelet_events)}"
         )
 
-        self._start_ar_continuous_computation()
-
         if self.current_ar_idx >= 0:
             self.jump_to_ar_event()
         elif self.current_wav_idx >= 0:
@@ -676,30 +706,55 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 f"No spindle detections found for this recording."
             )
 
-    def _start_ar_continuous_computation(self):
-        if not AR_LIVE_ANALYSIS_AVAILABLE:
-            if _AR_LIVE_IMPORT_ERROR:
-                self.status_bar.showMessage(
-                    f"AR R-profile modules not importable ({_AR_LIVE_IMPORT_ERROR}). Ensure your python path is correct.", 12000
-                )
-            return
+    def _on_xrange_changed(self, _, range_tuple):
+        """Fires repeatedly during panning. Debounce to prevent computation spam."""
+        if self.raw_signal is not None:
+            self.view_update_timer.start(300)
 
-        if self.raw_signal is None:
+    def _update_spinner(self):
+        self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_frames)
+        frame = self.spinner_frames[self.spinner_idx]
+        self.loading_text.setText(f"Calculating R-values {frame}")
+
+        # Center the text dynamically
+        view_range = self.p_r.viewRange()
+        cx = (view_range[0][0] + view_range[0][1]) / 2.0
+        cy = 0.5
+        self.loading_text.setPos(cx, cy)
+
+    def _start_window_computation(self):
+        if not AR_LIVE_ANALYSIS_AVAILABLE or self.raw_signal is None:
+            if _AR_LIVE_IMPORT_ERROR:
+                self.status_bar.showMessage(f"AR R-profile modules not importable: {_AR_LIVE_IMPORT_ERROR}", 12000)
             return
 
         if self._ar_signal_thread is not None and self._ar_signal_thread.isRunning():
             self._ar_signal_thread.quit()
             self._ar_signal_thread.wait()
 
-        self.status_bar.showMessage("Computing continuous AR R-values for entire recording in background...")
-        self._ar_signal_thread = ARFullSignalWorker(self.raw_signal)
-        self._ar_signal_thread.finished_ok.connect(self._on_ar_continuous_ready)
-        self._ar_signal_thread.failed.connect(lambda msg: self.status_bar.showMessage(f"AR computation failed: {msg}", 12000))
+        # Extract current view range
+        view_range = self.p_raw.viewRange()[0]
+        start_s, end_s = view_range[0], view_range[1]
+
+        # Launch spinner
+        self.loading_text.show()
+        self.spinner_timer.start(100)
+        self.curve_r_continuous.clear() # Clear out of bounds traces
+
+        self._ar_signal_thread = ARWindowWorker(self.raw_signal, start_s, end_s)
+        self._ar_signal_thread.finished_ok.connect(self._on_window_computation_ready)
+        self._ar_signal_thread.failed.connect(self._on_window_computation_failed)
         self._ar_signal_thread.start()
 
-    def _on_ar_continuous_ready(self, t_vals, r_vals):
-        self.status_bar.clearMessage()
+    def _on_window_computation_ready(self, t_vals, r_vals):
+        self.spinner_timer.stop()
+        self.loading_text.hide()
         self.curve_r_continuous.setData(t_vals, r_vals)
+
+    def _on_window_computation_failed(self, msg):
+        self.spinner_timer.stop()
+        self.loading_text.hide()
+        self.status_bar.showMessage(f"AR computation failed: {msg}", 12000)
 
     def draw_spans(self):
         self._remove_span_items()
