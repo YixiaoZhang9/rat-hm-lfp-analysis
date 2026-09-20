@@ -21,7 +21,6 @@ import statsmodels.api as sm
 from PyQt5 import QtCore, QtGui, QtWidgets
 from scipy.io import loadmat
 from scipy.signal import butter, filtfilt
-from statsmodels.regression.linear_model import burg  # Fix: explicitly import burg
 
 # --------------------------------------------------------------------------- #
 # Import Preprocessing Modules
@@ -65,73 +64,123 @@ REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
 class ARWindowWorker(QtCore.QThread):
     """
-    Computes the continuous R-value trace for the given time slice, using
-    the exact same synchronous loop logic from the working single-viewer.
+    Computes the continuous AR(8) pole R-value trace for the active view.
+    Uses the same preprocessing and Burg logic as the detector.
     """
-    # Fix: Use 'object' to prevent PyQt from silently dropping unregistered np.ndarray signals
-    finished_ok = QtCore.pyqtSignal(object, object)
+
+    finished_ok = QtCore.pyqtSignal(np.ndarray, np.ndarray)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, raw_signal, start_s, end_s, parent=None):
         super().__init__(parent)
         self.raw_signal = raw_signal
-        self.start_s = max(0.0, start_s)
-        self.end_s = end_s
+        self.start_s = max(0.0, float(start_s))
+        self.end_s = max(self.start_s, float(end_s))
 
     def run(self):
         try:
-            # We need to extract the signal + 1 second padding so the sliding
-            # window can calculate R-values all the way up to end_s.
+            # Extract active window + 1 second padding.
             pad = AR_WINDOW_SEC
             s_idx = int(self.start_s * FS)
-            e_idx = min(len(self.raw_signal), int((self.end_s + pad) * FS))
+            e_idx = min(
+                len(self.raw_signal),
+                int((self.end_s + pad) * FS)
+            )
 
             signal_segment = self.raw_signal[s_idx:e_idx]
 
-            if len(signal_segment) == 0:
-                self.finished_ok.emit(np.array([]), np.array([]))
+            if len(signal_segment) < int(FS):
+                self.finished_ok.emit(
+                    np.array([], dtype=float),
+                    np.array([], dtype=float)
+                )
                 return
 
-            # 1. Exact Preprocessing
+            # Exact detector preprocessing.
             filtered_signal = ar_bandpass_filter(
-                signal_segment, lowcut=0.1, highcut=100, fs=FS
+                signal_segment,
+                lowcut=0.1,
+                highcut=100.0,
+                fs=FS
             )
-            signal_128 = ar_downsampling(filtered_signal, FS, AR_TARGET_FS)
+            signal_128 = ar_downsampling(
+                filtered_signal,
+                FS,
+                AR_TARGET_FS
+            )
 
             window_samples = int(AR_WINDOW_SEC * AR_TARGET_FS)
             if len(signal_128) < window_samples:
-                self.finished_ok.emit(np.array([]), np.array([]))
+                self.finished_ok.emit(
+                    np.array([], dtype=float),
+                    np.array([], dtype=float)
+                )
                 return
 
+            # Sliding Burg AR(8).
             total_windows = len(signal_128) - window_samples + 1
-            r_values = np.zeros(total_windows)
+            r_values = np.full(
+                total_windows,
+                np.nan,
+                dtype=float
+            )
+            valid_count = 0
 
-            # 2. Exact Burg AR(8) Sliding Window
             for i in range(total_windows):
-                window = signal_128[i : i + window_samples]
+                window = signal_128[i:i + window_samples]
+
                 try:
-                    # Fix: use explicitly imported burg function
-                    a, _ = burg(
-                        window, order=AR_ORDER, demean=False
+                    a, _ = sm.regression.linear_model.burg(
+                        window,
+                        order=AR_ORDER,
+                        demean=False
                     )
-                    poles = np.roots(np.r_[1, -a])
+
+                    if len(a) != AR_ORDER:
+                        continue
+
+                    poles = np.roots(np.r_[1.0, -a])
                     poles = poles[np.imag(poles) > 0]
 
-                    freqs = np.angle(poles) * AR_TARGET_FS / (2 * np.pi)
+                    if len(poles) == 0:
+                        continue
+
+                    freqs = (
+                        np.angle(poles)
+                        * AR_TARGET_FS
+                        / (2.0 * np.pi)
+                    )
                     r_vals = np.abs(poles)
 
-                    mask = (freqs >= AR_SPINDLE_BAND[0]) & (freqs <= AR_SPINDLE_BAND[1])
+                    mask = (
+                        (freqs >= AR_SPINDLE_BAND[0])
+                        & (freqs <= AR_SPINDLE_BAND[1])
+                    )
                     r_vals = r_vals[mask]
 
                     if len(r_vals) > 0:
                         r_values[i] = float(np.max(r_vals))
-                except Exception:
-                    pass
+                        valid_count += 1
 
-            # 3. Exact Time alignment logic
-            t_vals = self.start_s + np.arange(len(r_values)) / AR_TARGET_FS
+                except Exception:
+                    # Invalid windows remain NaN.
+                    continue
+
+            # Time alignment.
+            t_vals = (
+                self.start_s
+                + np.arange(total_windows) / AR_TARGET_FS
+            )
+
+            if valid_count == 0:
+                self.failed.emit(
+                    "No valid AR R-values could be computed "
+                    f"for this window ({total_windows} windows tried)."
+                )
+                return
 
             self.finished_ok.emit(t_vals, r_values)
+
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
 
@@ -239,8 +288,7 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
 
 
 class SignalLoader(QtCore.QThread):
-    # Fix: Use 'object' to prevent PyQt from silently dropping unregistered np.ndarray signals
-    finished_ok = QtCore.pyqtSignal(object, object)
+    finished_ok = QtCore.pyqtSignal(np.ndarray, np.ndarray)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, data_path, parent=None):
@@ -741,11 +789,15 @@ class SpindleViewer(QtWidgets.QMainWindow):
         elif self.current_wav_idx >= 0:
             self.jump_to_wav_event()
         else:
-            self.p_raw.setXRange(0, min(VIEW_WINDOW_SEC, self.data_len / FS), padding=0)
+            view_end = min(VIEW_WINDOW_SEC, self.data_len / FS)
+            self.p_raw.setXRange(0, view_end, padding=0)
             self.details_panel.setText(
                 f"File: {file_name} | Length: {self.data_len/FS:.1f}s | "
                 f"No spindle detections found for this recording."
             )
+
+        # Explicitly trigger the initial AR-R calculation.
+        QtCore.QTimer.singleShot(100, self._start_window_computation)
 
     def _on_xrange_changed(self, _, range_tuple):
         """Fires repeatedly during panning. Debounce to prevent computation spam."""
@@ -794,8 +846,36 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.spinner_timer.stop()
         self.loading_text.hide()
 
-        if len(t_vals) > 0 and len(t_vals) == len(r_vals):
-            self.curve_r_continuous.setData(t_vals, r_vals)
+        if len(t_vals) == 0 or len(t_vals) != len(r_vals):
+            self.curve_r_continuous.clear()
+            return
+
+        finite = np.isfinite(r_vals)
+
+        if not np.any(finite):
+            self.curve_r_continuous.clear()
+            self.status_bar.showMessage(
+                "No valid AR R-values in the current window.",
+                5000
+            )
+            return
+
+        self.curve_r_continuous.setData(t_vals, r_vals)
+
+        # Scale the third plot to the actual R-values.
+        r_min = float(np.nanmin(r_vals[finite]))
+        r_max = float(np.nanmax(r_vals[finite]))
+
+        if r_max <= r_min:
+            r_max = r_min + 0.05
+
+        margin = max(0.02, (r_max - r_min) * 0.10)
+
+        self.p_r.setYRange(
+            max(0.0, r_min - margin),
+            min(1.05, r_max + margin),
+            padding=0
+        )
 
     def _on_window_computation_failed(self, msg):
         self.spinner_timer.stop()
