@@ -6,16 +6,23 @@ Page through detected spindle events from two detectors overlaid on the raw
 LFP, band-passed LFP, and a continuous AR R-value trace dynamically computed
 for the active view window.
 
-The AR trace is computed with the exact same pipeline that the extraction
-script uses via find_spindles_lfp() so the live trace and the CSV events agree:
+The AR trace is computed with the exact same pipeline as the extraction
+script's find_spindles_lfp() so the live trace and the CSV events agree:
 
     1. bandpass_filter(raw, lowcut=0.1, highcut=100, fs=1000)
     2. downsampling(filtered, 1000, 128)
     3. sliding 1.0 s window @ 128 Hz, stride_samples=4
     4. burg(order=8, demean=False), poles with imag>0
-    5. per-window R = max |pole| over poles with frequency in [10, 15] Hz,
-       or 0.0 if no in-band pole
+    5. per-window R_detector = max |pole| over poles in [10, 15] Hz (0 if none)
+       per-window R_nearest  = |pole| of the pole closest to 12.5 Hz,
+                               along with the frequency of that pole
     6. time axis = (start_sample + window_samples/2) / 128
+
+Two traces are drawn on the R plot:
+  * Orange, solid  -- R_detector. Gaps where no in-band pole exists (matches
+                      CSV Max_R exactly).
+  * Colored, thin  -- R_nearest. Painted green where the nearest pole is
+                      inside [10, 15] Hz, pink where it falls outside.
 """
 
 import argparse
@@ -55,8 +62,7 @@ except ImportError as e:
     _IMPORT_ERROR = str(e)
 
 # --------------------------------------------------------------------------- #
-# Configuration — must mirror find_spindles_lfp() defaults and the extraction
-# script's call so the live trace reproduces the CSV events.
+# Configuration
 # --------------------------------------------------------------------------- #
 DEFAULT_MANIFEST = os.environ.get("SPINDLE_MANIFEST", "tasks_manifest.csv")
 DEFAULT_AR_CSV = os.environ.get(
@@ -75,14 +81,11 @@ VIEW_WINDOW_SEC = 10.0
 AR_TARGET_FS = 128
 AR_ORDER = 8
 AR_SPINDLE_BAND = (BP_LOW, BP_HIGH)
+AR_BAND_CENTER = 0.5 * (AR_SPINDLE_BAND[0] + AR_SPINDLE_BAND[1])
 AR_WINDOW_SEC = 1.0
-AR_STRIDE_SAMPLES = 4              # matches extraction script's STRIDE
+AR_STRIDE_SAMPLES = 4
 AR_PRE_LOWCUT = 0.1
 AR_PRE_HIGHCUT = 100.0
-
-# Extra padding beyond the visible window so the final AR window can complete.
-# In samples of the downsampled signal.
-AR_PAD_DOWNSAMPLED = int(AR_WINDOW_SEC * AR_TARGET_FS)
 
 DEBOUNCE_MS = 300
 STALE_TOLERANCE_SEC = 0.5
@@ -112,18 +115,22 @@ def _sanitize(x):
 
 
 # --------------------------------------------------------------------------- #
-# AR Window Worker — mirrors find_spindles_lfp internals exactly
+# AR Window Worker
 # --------------------------------------------------------------------------- #
 class ARWindowWorker(QtCore.QThread):
     """
-    Computes the continuous R trace for the given time slice, using the same
-    pipeline as find_spindles_lfp() so the trace reproduces the detector's
-    per-window R values.
+    Emits:
+      finished_ok(requested_start_s, requested_end_s,
+                  t_vals, r_detector, r_nearest, freq_nearest)
 
-    Emits: finished_ok(requested_start_s, requested_end_s, t_vals, r_vals)
+    r_detector    -- max |pole| over poles in AR_SPINDLE_BAND; 0 if none.
+                     Matches the CSV Max_R from find_spindles_lfp.
+    r_nearest     -- |pole| of the pole closest to 12.5 Hz (always finite,
+                     NaN only if the window has no poles at all).
+    freq_nearest  -- frequency of that nearest pole, in Hz.
     """
 
-    finished_ok = QtCore.pyqtSignal(float, float, list, list)
+    finished_ok = QtCore.pyqtSignal(float, float, list, list, list, list)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, raw_signal, start_s, end_s, parent=None):
@@ -142,14 +149,11 @@ class ARWindowWorker(QtCore.QThread):
             f"raw_len={len(self.raw_signal)}"
         )
         try:
-            # Pad on both sides so windows whose CENTER falls within the
-            # visible range have all their samples available.
             half_win_sec = AR_WINDOW_SEC / 2.0
             s_idx = max(0, int((self.start_s - half_win_sec) * FS))
             e_idx = min(
                 len(self.raw_signal), int((self.end_s + half_win_sec) * FS)
             )
-
             if s_idx >= e_idx:
                 self._emit_empty()
                 return
@@ -159,7 +163,7 @@ class ARWindowWorker(QtCore.QThread):
                 self._emit_empty()
                 return
 
-            # ---- Stage 1: same pre-filter as find_spindles_lfp -------- #
+            # Stage 1: same pre-filter as find_spindles_lfp
             try:
                 filtered = ar_bandpass_filter(
                     segment_raw,
@@ -173,7 +177,7 @@ class ARWindowWorker(QtCore.QThread):
                 )
             filtered = _sanitize(filtered)
 
-            # ---- Stage 2: same downsample ----------------------------- #
+            # Stage 2: same downsample
             signal_128 = _sanitize(ar_downsampling(filtered, FS, AR_TARGET_FS))
 
             window_samples = int(AR_WINDOW_SEC * AR_TARGET_FS)
@@ -185,10 +189,12 @@ class ARWindowWorker(QtCore.QThread):
             starts = np.arange(0, total_windows, AR_STRIDE_SAMPLES)
             n_windows = len(starts)
 
-            r_values = np.zeros(n_windows, dtype=np.float64)  # detector uses 0.0 for no-in-band
+            r_detector = np.zeros(n_windows, dtype=np.float64)
+            r_nearest = np.full(n_windows, np.nan, dtype=np.float64)
+            freq_nearest = np.full(n_windows, np.nan, dtype=np.float64)
+
             n_in_band = 0
             n_failed = 0
-            first_error = None
 
             for k, i in enumerate(starts):
                 if self._is_cancelled:
@@ -200,49 +206,49 @@ class ARWindowWorker(QtCore.QThread):
 
                 try:
                     a, _ = sm.regression.linear_model.burg(
-                        window, order=AR_ORDER, demean=False  # matches detector
+                        window, order=AR_ORDER, demean=False
                     )
                     poles = np.roots(np.r_[1, -a])
                     poles = poles[np.imag(poles) > 0]
+                    if len(poles) == 0:
+                        n_failed += 1
+                        continue
 
-                    if len(poles) > 0:
-                        freqs = np.angle(poles) * AR_TARGET_FS / (2 * np.pi)
-                        r_vals = np.abs(poles)
-                        mask = (
-                            (freqs >= AR_SPINDLE_BAND[0])
-                            & (freqs <= AR_SPINDLE_BAND[1])
-                        )
-                        if np.any(mask):
-                            r_values[k] = float(np.max(r_vals[mask]))
-                            n_in_band += 1
-                        # else: leave 0.0, same as _fit_window
-                except Exception as exc:
+                    freqs = np.angle(poles) * AR_TARGET_FS / (2 * np.pi)
+                    r_vals = np.abs(poles)
+
+                    # Detector-exact value: strict in-band max, 0 if none.
+                    mask = (
+                        (freqs >= AR_SPINDLE_BAND[0])
+                        & (freqs <= AR_SPINDLE_BAND[1])
+                    )
+                    if np.any(mask):
+                        r_detector[k] = float(np.max(r_vals[mask]))
+                        n_in_band += 1
+
+                    # Nearest-to-band-center pole, always recorded.
+                    idx_c = int(np.argmin(np.abs(freqs - AR_BAND_CENTER)))
+                    r_nearest[k] = float(r_vals[idx_c])
+                    freq_nearest[k] = float(freqs[idx_c])
+                except Exception:
                     n_failed += 1
-                    if first_error is None:
-                        first_error = f"{type(exc).__name__}: {exc}"
 
             if self._is_cancelled:
                 return
 
-            # ---- Stage 3: time axis = window CENTER in absolute time --- #
-            # We computed windows on signal_128 starting at index 0, which
-            # corresponds to raw sample s_idx. The window's start sample in
-            # the raw timeline is s_idx + i * (FS/AR_TARGET_FS), and its
-            # center adds half the window length.
+            # Time axis = window center in absolute time
             downsample_ratio = FS / AR_TARGET_FS
             half_win_raw = window_samples * downsample_ratio / 2.0
             t_vals = (s_idx + starts * downsample_ratio + half_win_raw) / FS
 
             vprint(
-                f"[AR] emit n={n_windows} in_band={n_in_band} "
-                f"fail={n_failed} "
+                f"[AR] n={n_windows} in_band={n_in_band} fail={n_failed} "
                 f"t=[{t_vals[0]:.3f},{t_vals[-1]:.3f}]"
             )
 
             if n_in_band == 0 and n_failed == n_windows:
                 self.failed.emit(
-                    f"All {n_windows} AR windows failed. "
-                    f"First error: {first_error or 'no poles'}"
+                    f"All {n_windows} AR windows failed (no poles found)."
                 )
                 return
 
@@ -250,7 +256,9 @@ class ARWindowWorker(QtCore.QThread):
                 self.start_s,
                 self.end_s,
                 t_vals.tolist(),
-                r_values.tolist(),
+                r_detector.tolist(),
+                r_nearest.tolist(),
+                freq_nearest.tolist(),
             )
         except Exception as e:
             vprint(f"[AR] exception: {type(e).__name__}: {e}")
@@ -258,7 +266,7 @@ class ARWindowWorker(QtCore.QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
     def _emit_empty(self):
-        self.finished_ok.emit(self.start_s, self.end_s, [], [])
+        self.finished_ok.emit(self.start_s, self.end_s, [], [], [], [])
 
 
 # --------------------------------------------------------------------------- #
@@ -281,7 +289,6 @@ class SignalLoader(QtCore.QThread):
                 raise KeyError(
                     f"'.mat' file has no 'data' variable (found: {keys})"
                 )
-
             raw = mat_data["data"].squeeze().astype(np.float32)
             if raw.ndim != 1:
                 raw = raw.reshape(-1)
@@ -442,6 +449,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self._pending_task = None
         self._syncing_navigation = False
 
+        # Cache of the latest trace data (so we can repaint colored segments
+        # when the region thresholds change).
+        self._last_trace = None
+
         self.view_update_timer = QtCore.QTimer(self)
         self.view_update_timer.setSingleShot(True)
         self.view_update_timer.timeout.connect(self._start_window_computation)
@@ -520,7 +531,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
         for text, color in [
             ("■ AR Spindle Event", "#ff3333"),
             ("■ Wavelet Spindle Event", "#00e5ff"),
-            ("— AR R (in-band max)", "#ffab40"),
+            ("— R in-band (detector)", "#ffab40"),
+            ("— Nearest pole IN band", "#00e676"),
+            ("— Nearest pole OUT of band", "#ff4fd8"),
             ("--- T_upper", "#ff5252"),
             ("--- T_lower", "#52a0ff"),
         ]:
@@ -553,10 +566,20 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_r.setLabel("left", "R")
         self.p_r.setLabel("bottom", "Time", units="s")
 
-        # The detector returns 0.0 when no in-band pole exists; use a marker
-        # (not a line) so the zeros don't dominate the plot.
+        # Detector-exact trace (fragmented; matches CSV Max_R).
         self.curve_r_continuous = self.p_r.plot(
             pen=pg.mkPen(color="#ffab40", width=2),
+            connect="finite",
+        )
+        # Two colored segments for the nearest-pole trace. Only one of the two
+        # is populated at any given time index, producing the in/out color
+        # coding without needing many small curve items.
+        self.curve_nearest_in = self.p_r.plot(
+            pen=pg.mkPen(color=(0, 230, 118, 200), width=1.6),
+            connect="finite",
+        )
+        self.curve_nearest_out = self.p_r.plot(
+            pen=pg.mkPen(color=(255, 79, 216, 200), width=1.6),
             connect="finite",
         )
 
@@ -639,7 +662,59 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.line_lower.setValue(lower)
         ymax = max(1.05, upper * 1.05)
         self.p_r.setYRange(0.0, ymax, padding=0)
-        vprint(f"[UI] T_upper={upper:.3f} T_lower={lower:.3f}")
+
+    # --------------------------------------------------------------------- #
+    # Colored-segment split for the nearest-pole trace
+    # --------------------------------------------------------------------- #
+    def _split_nearest_into_in_out(self, t_arr, r_arr, f_arr):
+        """
+        Return (t_in, r_in, t_out, r_out) where the trace is split by whether
+        the nearest pole's frequency falls inside AR_SPINDLE_BAND.
+
+        Points adjacent to a boundary are duplicated in both arrays so the
+        colored line is continuous.
+        """
+        lo, hi = AR_SPINDLE_BAND
+        in_band = (f_arr >= lo) & (f_arr <= hi)
+        finite = np.isfinite(r_arr) & np.isfinite(f_arr)
+
+        # Base arrays: r masked to NaN where the point isn't in this category.
+        r_in = np.where(finite & in_band, r_arr, np.nan)
+        r_out = np.where(finite & ~in_band, r_arr, np.nan)
+
+        # Bridge across boundary samples so the line is continuous:
+        # if t[i] is in_band and t[i+1] is out_band, append t[i+1]'s r to
+        # r_in and vice versa.
+        if len(t_arr) > 1:
+            crossings = np.where(in_band[:-1] != in_band[1:])[0]
+            for c in crossings:
+                i_next = c + 1
+                if not finite[i_next] or not finite[c]:
+                    continue
+                if in_band[c] and not in_band[i_next]:
+                    r_in[i_next] = r_arr[i_next]
+                elif not in_band[c] and in_band[i_next]:
+                    r_out[i_next] = r_arr[i_next]
+
+        return (
+            t_arr, r_in,
+            t_arr, r_out,
+        )
+
+    def _apply_nearest_colors(self):
+        """Repaint the nearest-pole colored trace from the cached data."""
+        cache = self._last_trace
+        if cache is None:
+            return
+        t_arr, r_nearest, f_nearest = cache
+        if len(t_arr) == 0:
+            return
+
+        t_in, r_in, t_out, r_out = self._split_nearest_into_in_out(
+            t_arr, r_nearest, f_nearest
+        )
+        self.curve_nearest_in.setData(t_in, r_in)
+        self.curve_nearest_out.setData(t_out, r_out)
 
     # --------------------------------------------------------------------- #
     # Data loading
@@ -834,6 +909,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_raw.clear()
         self.curve_filt.clear()
         self.curve_r_continuous.clear()
+        self.curve_nearest_in.clear()
+        self.curve_nearest_out.clear()
+        self._last_trace = None
         self._remove_span_items()
         self.current_ar_events = pd.DataFrame()
         self.current_wavelet_events = pd.DataFrame()
@@ -916,6 +994,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_raw.setData(self.time_vector, self.raw_signal)
         self.curve_filt.setData(self.time_vector, self.filtered_signal)
         self.curve_r_continuous.clear()
+        self.curve_nearest_in.clear()
+        self.curve_nearest_out.clear()
+        self._last_trace = None
 
         self._refresh_threshold_lines()
         self.draw_spans()
@@ -1022,6 +1103,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.loading_text.show()
         self.spinner_timer.start(100)
         self.curve_r_continuous.clear()
+        self.curve_nearest_in.clear()
+        self.curve_nearest_out.clear()
 
         self._ar_signal_thread = ARWindowWorker(
             self.raw_signal, start_s, end_s, parent=self
@@ -1031,38 +1114,47 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self._ar_signal_thread.start()
 
     def _on_window_computation_ready(
-        self, requested_start, requested_end, t_vals, r_vals
+        self,
+        requested_start,
+        requested_end,
+        t_vals,
+        r_detector,
+        r_nearest,
+        f_nearest,
     ):
         self.spinner_timer.stop()
         self.loading_text.hide()
 
         current_view = self.p_raw.viewRange()[0]
         cur_lo, cur_hi = float(current_view[0]), float(current_view[1])
-
         if (
             abs(cur_lo - requested_start) > STALE_TOLERANCE_SEC
             or abs(cur_hi - requested_end) > STALE_TOLERANCE_SEC
         ):
             return
-
-        if len(t_vals) == 0 or len(t_vals) != len(r_vals):
+        if len(t_vals) == 0:
             return
 
         t_arr = np.asarray(t_vals, dtype=np.float64)
-        r_arr = np.asarray(r_vals, dtype=np.float64)
+        r_det = np.asarray(r_detector, dtype=np.float64)
+        r_ne = np.asarray(r_nearest, dtype=np.float64)
+        f_ne = np.asarray(f_nearest, dtype=np.float64)
 
-        # Detector returns 0.0 when no in-band pole exists. Convert those to
-        # NaN so connect="finite" draws gaps instead of dropping to zero.
-        r_plot = np.where(r_arr > 0.0, r_arr, np.nan)
+        # Detector's 0 means "no in-band pole" -- show as gap in orange.
+        r_det_plot = np.where(r_det > 0.0, r_det, np.nan)
 
         data_lo, data_hi = float(t_arr[0]), float(t_arr[-1])
         if cur_hi < data_lo or cur_lo > data_hi:
             self.p_raw.setXRange(data_lo, data_hi, padding=0)
 
-        self.curve_r_continuous.setData(t_arr, r_plot)
+        self.curve_r_continuous.setData(t_arr, r_det_plot)
+
+        # Cache for repaint on region change.
+        self._last_trace = (t_arr, r_ne, f_ne)
+        self._apply_nearest_colors()
 
         upper, _ = self._current_thresholds()
-        finite = r_plot[np.isfinite(r_plot)]
+        finite = r_ne[np.isfinite(r_ne)]
         data_max = float(np.nanmax(finite)) if finite.size else 0.0
         ymax = max(1.05, upper * 1.05, data_max * 1.05)
         self.p_r.setYRange(0.0, ymax, padding=0)
@@ -1101,14 +1193,16 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 self.current_wavelet_events,
                 brush_rgba=(0, 229, 255, 90),
                 pen_rgba=(0, 229, 255, 230),
-                width=1.8, z=5,
+                width=1.8,
+                z=5,
             )
         if not self.current_ar_events.empty:
             add_spans(
                 self.current_ar_events,
                 brush_rgba=(255, 50, 50, 80),
                 pen_rgba=(255, 50, 50, 230),
-                width=1.5, z=10,
+                width=1.5,
+                z=10,
             )
 
     # --------------------------------------------------------------------- #
@@ -1372,6 +1466,7 @@ def main():
         print(f"MODULES_AVAILABLE = {MODULES_AVAILABLE}")
         print(f"AR_STRIDE_SAMPLES = {AR_STRIDE_SAMPLES}")
         print(f"AR_ORDER = {AR_ORDER}  AR_WINDOW_SEC = {AR_WINDOW_SEC}")
+        print(f"AR_BAND = {AR_SPINDLE_BAND}  AR_BAND_CENTER = {AR_BAND_CENTER}")
         print(f"AR_PRE_FILTER = ({AR_PRE_LOWCUT}, {AR_PRE_HIGHCUT})")
         print("=" * 70)
 
