@@ -62,10 +62,29 @@ AR_WINDOW_SEC = 1.0
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
 
+def _sanitize(x):
+    """Return a float64 numpy array free of NaN/Inf."""
+    arr = np.asarray(x, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    return arr
+
+
 class ARWindowWorker(QtCore.QThread):
     """
     Computes the continuous R-value trace for the given time slice.
-    Uses list types for signals to bypass PyQt5's silent dropping of np.ndarray.
+
+    Robustness notes:
+      * Raw / filtered / downsampled signals are sanitized at every stage so
+        a single NaN from the .mat load or filtfilt edge cannot poison every
+        Burg window (which previously produced an all-zero trace that was
+        silently swallowed by `except Exception: pass`).
+      * r_values is initialized with NaN, not 0. Combined with
+        connect="finite" on the curve this makes failures visible as gaps
+        instead of a misleading flat line.
+      * Burg is called with demean=True (the statistically correct default
+        for a bandpassed signal) which avoids near-singular Toeplitz systems.
+      * If every window fails we emit `failed` instead of an all-NaN trace.
     """
     finished_ok = QtCore.pyqtSignal(list, list)
     failed = QtCore.pyqtSignal(str)
@@ -87,16 +106,29 @@ class ARWindowWorker(QtCore.QThread):
             s_idx = int(self.start_s * FS)
             e_idx = min(len(self.raw_signal), int((self.end_s + pad) * FS))
 
-            signal_segment = self.raw_signal[s_idx:e_idx]
+            if s_idx >= e_idx:
+                self.finished_ok.emit([], [])
+                return
 
+            signal_segment = _sanitize(self.raw_signal[s_idx:e_idx])
             if len(signal_segment) == 0:
                 self.finished_ok.emit([], [])
                 return
 
-            filtered_signal = ar_bandpass_filter(
-                signal_segment, lowcut=0.1, highcut=100, fs=FS
-            )
+            # ---- Stage 1: broad bandpass (0.1-100 Hz) -------------------
+            try:
+                filtered_signal = ar_bandpass_filter(
+                    signal_segment, lowcut=0.1, highcut=100, fs=FS
+                )
+            except TypeError:
+                # Fall back to positional call in case the module signature
+                # differs from the keyword form we expect.
+                filtered_signal = ar_bandpass_filter(signal_segment, 0.1, 100, FS)
+            filtered_signal = _sanitize(filtered_signal)
+
+            # ---- Stage 2: downsample to 128 Hz ---------------------------
             signal_128 = ar_downsampling(filtered_signal, FS, AR_TARGET_FS)
+            signal_128 = _sanitize(signal_128)
 
             window_samples = int(AR_WINDOW_SEC * AR_TARGET_FS)
             if len(signal_128) < window_samples:
@@ -104,16 +136,24 @@ class ARWindowWorker(QtCore.QThread):
                 return
 
             total_windows = len(signal_128) - window_samples + 1
-            r_values = np.zeros(total_windows)
+            # NaN (not 0) so failures are distinguishable from real R=0.
+            r_values = np.full(total_windows, np.nan, dtype=np.float64)
+
+            n_failed = 0
+            first_error = None
 
             for i in range(total_windows):
                 if self._is_cancelled:
                     return
 
                 window = signal_128[i : i + window_samples]
+                if not np.all(np.isfinite(window)) or np.all(window == 0.0):
+                    n_failed += 1
+                    continue
+
                 try:
                     a, _ = sm.regression.linear_model.burg(
-                        window, order=AR_ORDER, demean=False
+                        window, order=AR_ORDER, demean=True
                     )
                     poles = np.roots(np.r_[1, -a])
                     poles = poles[np.imag(poles) > 0]
@@ -126,10 +166,24 @@ class ARWindowWorker(QtCore.QThread):
 
                     if len(r_vals) > 0:
                         r_values[i] = float(np.max(r_vals))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    n_failed += 1
+                    if first_error is None:
+                        first_error = f"{type(exc).__name__}: {exc}"
 
             if self._is_cancelled:
+                return
+
+            valid = np.isfinite(r_values).sum()
+            if valid == 0:
+                msg = (
+                    f"All {total_windows} AR windows failed. "
+                    f"First error: {first_error or 'no poles in spindle band'}. "
+                    f"Likely cause: NaN/Inf in source signal or statsmodels "
+                    f"burg signature mismatch."
+                )
+                print(f"[ARWindowWorker] {msg}", file=sys.stderr)
+                self.failed.emit(msg)
                 return
 
             t_vals = self.start_s + np.arange(len(r_values)) / AR_TARGET_FS
@@ -262,7 +316,18 @@ class SignalLoader(QtCore.QThread):
             raw = mat_data["data"].squeeze().astype(np.float32)
             if raw.ndim != 1:
                 raw = raw.reshape(-1)
+
+            # Sanitize BEFORE filtering: a single NaN in raw would propagate
+            # through filtfilt and every downstream Burg window.
+            n_nan = int(np.count_nonzero(~np.isfinite(raw)))
+            if n_nan:
+                print(f"[SignalLoader] sanitizing {n_nan} non-finite sample(s) "
+                      f"in {self.data_path}", file=sys.stderr)
+                raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
+
             filtered = butter_bandpass_filter(raw, BP_LOW, BP_HIGH, FS).astype(np.float32)
+            filtered = np.nan_to_num(filtered, nan=0.0, posinf=0.0, neginf=0.0)
+
             self.finished_ok.emit(raw, filtered)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -416,6 +481,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.loading_text.setFont(font)
         self.p_r.addItem(self.loading_text)
         self.loading_text.hide()
+
+        # Fixed, sensible initial Y-range for the R trace. Auto-ranging on an
+        # all-NaN trace collapses the axis to [0, 0] and hides the curve.
+        self.p_r.setYRange(0.0, 1.05, padding=0)
 
         self.p_filt.setXLink(self.p_raw)
         self.p_r.setXLink(self.p_raw)
@@ -652,7 +721,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self._loader_thread.quit()
             self._loader_thread.wait()
 
-        self._loader_thread = SignalLoader(data_path)
+        self._loader_thread = SignalLoader(data_path, parent=self)
         self._loader_thread.finished_ok.connect(self._on_signal_loaded)
         self._loader_thread.failed.connect(self._on_signal_load_failed)
         self._loader_thread.start()
@@ -721,6 +790,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_raw.setData(self.time_vector, self.raw_signal)
         self.curve_filt.setData(self.time_vector, self.filtered_signal)
         self.curve_r_continuous.clear()
+        # Reset the Y-range for the new recording.
+        self.p_r.setYRange(0.0, 1.05, padding=0)
 
         self.draw_spans()
 
@@ -747,247 +818,4 @@ class SpindleViewer(QtWidgets.QMainWindow):
             # Ensure computation runs even if there are no events to jump to
             self.view_update_timer.start(300)
 
-    def _on_xrange_changed(self, _, range_tuple):
-        if self.raw_signal is not None:
-            self.view_update_timer.start(300)
-
-    def _update_spinner(self):
-        self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_frames)
-        frame = self.spinner_frames[self.spinner_idx]
-        self.loading_text.setText(f"Calculating R-values {frame}")
-
-        view_range = self.p_r.viewRange()
-        cx = (view_range[0][0] + view_range[0][1]) / 2.0
-        cy = (view_range[1][0] + view_range[1][1]) / 2.0
-
-        if view_range[1][0] == 0.0 and view_range[1][1] == 1.0:
-            cy = 0.5
-
-        self.loading_text.setPos(cx, cy)
-
-    def _start_window_computation(self):
-        if not MODULES_AVAILABLE or self.raw_signal is None:
-            return
-
-        if self._ar_signal_thread is not None and self._ar_signal_thread.isRunning():
-            self._ar_signal_thread.cancel()
-            self._ar_signal_thread.wait()
-
-        view_range = self.p_raw.viewRange()[0]
-        start_s, end_s = view_range[0], view_range[1]
-
-        self.loading_text.show()
-        self.spinner_timer.start(100)
-        self.curve_r_continuous.clear()
-
-        self._ar_signal_thread = ARWindowWorker(self.raw_signal, start_s, end_s)
-        self._ar_signal_thread.finished_ok.connect(self._on_window_computation_ready)
-        self._ar_signal_thread.failed.connect(self._on_window_computation_failed)
-        self._ar_signal_thread.start()
-
-    def _on_window_computation_ready(self, t_vals, r_vals):
-        self.spinner_timer.stop()
-        self.loading_text.hide()
-
-        if len(t_vals) > 0 and len(t_vals) == len(r_vals):
-            # Recast python lists to highly optimized numpy arrays for the PyQtGraph render pipeline
-            self.curve_r_continuous.setData(np.array(t_vals), np.array(r_vals))
-
-    def _on_window_computation_failed(self, msg):
-        self.spinner_timer.stop()
-        self.loading_text.hide()
-        self.status_bar.showMessage(f"AR computation failed: {msg}", 12000)
-
-    def draw_spans(self):
-        self._remove_span_items()
-
-        if not self.current_wavelet_events.empty:
-            for _, row in self.current_wavelet_events.iterrows():
-                s, e = safe_float(row["Start_s"], 0.0), safe_float(row["End_s"], 0.0)
-                triple = tuple(
-                    pg.LinearRegionItem(
-                        [s, e], movable=False,
-                        brush=QtGui.QColor(0, 229, 255, 90),
-                        pen=pg.mkPen(color=(0, 229, 255, 230), width=1.8, style=QtCore.Qt.DashLine),
-                    )
-                    for _ in range(3)
-                )
-                for r_item, plot in zip(triple, self._span_plots):
-                    r_item.setZValue(5)
-                    plot.addItem(r_item)
-                self.region_items.append(triple)
-
-        if not self.current_ar_events.empty:
-            for _, row in self.current_ar_events.iterrows():
-                s, e = safe_float(row["Start_s"], 0.0), safe_float(row["End_s"], 0.0)
-                triple = tuple(
-                    pg.LinearRegionItem(
-                        [s, e], movable=False,
-                        brush=QtGui.QColor(255, 50, 50, 80),
-                        pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5),
-                    )
-                    for _ in range(3)
-                )
-                for r_item, plot in zip(triple, self._span_plots):
-                    r_item.setZValue(10)
-                    plot.addItem(r_item)
-                self.region_items.append(triple)
-
-    def on_prev_ar_event(self):
-        if len(self.current_ar_events) == 0:
-            return
-        self.current_ar_idx = (self.current_ar_idx - 1) % len(self.current_ar_events)
-        self.jump_to_ar_event()
-
-    def on_next_ar_event(self):
-        if len(self.current_ar_events) == 0:
-            return
-        self.current_ar_idx = (self.current_ar_idx + 1) % len(self.current_ar_events)
-        self.jump_to_ar_event()
-
-    def on_prev_wav_event(self):
-        if len(self.current_wavelet_events) == 0:
-            return
-        self.current_wav_idx = (self.current_wav_idx - 1) % len(self.current_wavelet_events)
-        self.jump_to_wav_event()
-
-    def on_next_wav_event(self):
-        if len(self.current_wavelet_events) == 0:
-            return
-        self.current_wav_idx = (self.current_wav_idx + 1) % len(self.current_wavelet_events)
-        self.jump_to_wav_event()
-
-    def _centered_view_range(self, start_s, end_s):
-        total_duration = self.data_len / FS
-        center = (start_s + end_s) / 2.0
-        half = VIEW_WINDOW_SEC / 2.0
-        view_start = center - half
-        view_end = center + half
-
-        if view_start < 0.0:
-            view_start = 0.0
-            view_end = min(VIEW_WINDOW_SEC, total_duration)
-        if view_end > total_duration:
-            view_end = total_duration
-            view_start = max(0.0, view_end - VIEW_WINDOW_SEC)
-
-        return view_start, view_end
-
-    def jump_to_ar_event(self):
-        if self.current_ar_idx < 0 or self.current_ar_idx >= len(self.current_ar_events):
-            return
-
-        event = self.current_ar_events.iloc[self.current_ar_idx]
-        start_s = safe_float(event["Start_s"], 0.0)
-        end_s = safe_float(event["End_s"], 0.0)
-
-        view_start, view_end = self._centered_view_range(start_s, end_s)
-
-        self.p_raw.setXRange(view_start, view_end, padding=0)
-        self.p_r.setYRange(0.0, 1.05, padding=0)
-
-        self.view_update_timer.start(300)
-
-        overlapping = pd.DataFrame()
-        if not self.current_wavelet_events.empty:
-            w = self.current_wavelet_events
-            overlapping = w[(w["Start_s"] <= end_s) & (w["End_s"] >= start_s)]
-
-        align_desc = (
-            f"ALIGNED: Overlaps with {len(overlapping)} wavelet detection(s)"
-            if len(overlapping) > 0
-            else "ISOLATED: No overlapping wavelet event"
-        )
-
-        r_val = event.get("Max_R", np.nan)
-        freq_val = event.get("Peak_Freq_Hz", np.nan)
-        dur = end_s - start_s
-
-        lines = [
-            f"[Focus: AR Spindle #{self.current_ar_idx + 1}/{len(self.current_ar_events)}] "
-            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)",
-            f"CSV Detection: Max R = {fmt(r_val)} | Peak Freq = {fmt(freq_val, '.2f')} Hz",
-            f"Alignment Status: {align_desc}"
-        ]
-
-        self.details_panel.setText("\n".join(lines))
-        self.lbl_ar_tracker.setText(f"AR: {self.current_ar_idx + 1} / {len(self.current_ar_events)}")
-
-    def jump_to_wav_event(self):
-        if self.current_wav_idx < 0 or self.current_wav_idx >= len(self.current_wavelet_events):
-            return
-
-        event = self.current_wavelet_events.iloc[self.current_wav_idx]
-        start_s = safe_float(event["Start_s"], 0.0)
-        end_s = safe_float(event["End_s"], 0.0)
-
-        view_start, view_end = self._centered_view_range(start_s, end_s)
-
-        self.p_raw.setXRange(view_start, view_end, padding=0)
-        self.p_r.setYRange(0.0, 1.05, padding=0)
-
-        self.view_update_timer.start(300)
-
-        overlapping = pd.DataFrame()
-        if not self.current_ar_events.empty:
-            a = self.current_ar_events
-            overlapping = a[(a["Start_s"] <= end_s) & (a["End_s"] >= start_s)]
-
-        align_desc = (
-            f"ALIGNED: Overlaps with {len(overlapping)} AR detection(s)"
-            if len(overlapping) > 0
-            else "ISOLATED: No overlapping AR event"
-        )
-
-        dur = end_s - start_s
-        lines = [
-            f"[Focus: Wavelet Spindle #{self.current_wav_idx + 1}/{len(self.current_wavelet_events)}] "
-            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)",
-            f"Alignment Status: {align_desc}"
-        ]
-
-        self.details_panel.setText("\n".join(lines))
-        self.lbl_wav_tracker.setText(f"WAV: {self.current_wav_idx + 1} / {len(self.current_wavelet_events)}")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Spindle Alignment Inspector (AR vs Wavelet)")
-    parser.add_argument("--manifest", default=DEFAULT_MANIFEST, help="Path to tasks_manifest.csv")
-    parser.add_argument("--ar-csv", default=DEFAULT_AR_CSV, help="Path to AR-detected spindles CSV")
-    parser.add_argument("--wavelet-csv", default=DEFAULT_WAVELET_CSV, help="Path to wavelet-detected spindles CSV")
-    args, _ = parser.parse_known_args()
-    return args
-
-
-def main():
-    args = parse_args()
-
-    app = QtWidgets.QApplication(sys.argv)
-    app.setStyle("Fusion")
-
-    dark_palette = QtGui.QPalette()
-    dark_palette.setColor(QtGui.QPalette.Window, QtGui.QColor(40, 40, 40))
-    dark_palette.setColor(QtGui.QPalette.WindowText, QtCore.Qt.white)
-    dark_palette.setColor(QtGui.QPalette.Base, QtGui.QColor(25, 25, 25))
-    dark_palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor(40, 40, 40))
-    dark_palette.setColor(QtGui.QPalette.ToolTipBase, QtCore.Qt.white)
-    dark_palette.setColor(QtGui.QPalette.ToolTipText, QtCore.Qt.white)
-    dark_palette.setColor(QtGui.QPalette.Text, QtCore.Qt.white)
-    dark_palette.setColor(QtGui.QPalette.Button, QtGui.QColor(50, 50, 50))
-    dark_palette.setColor(QtGui.QPalette.ButtonText, QtCore.Qt.white)
-    dark_palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor(0, 188, 212))
-    dark_palette.setColor(QtGui.QPalette.HighlightedText, QtCore.Qt.black)
-    app.setPalette(dark_palette)
-
-    def excepthook(exc_type, exc_value, exc_tb):
-        traceback.print_exception(exc_type, exc_value, exc_tb)
-
-    sys.excepthook = excepthook
-
-    viewer = SpindleViewer(args.manifest, args.ar_csv, args.wavelet_csv)
-    viewer.show()
-    sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
-    main()
+    def _on_xrange_changed(self
