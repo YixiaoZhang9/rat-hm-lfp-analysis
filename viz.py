@@ -21,6 +21,9 @@ Architecture notes:
   * Raw / filtered / downsampled signals are sanitized at every stage so a
     single NaN cannot poison every Burg window. r_values is initialized with
     NaN so failures are visible as gaps rather than a misleading flat line.
+  * Region-specific upper / lower detection thresholds are drawn as dashed
+    horizontal reference lines on the R trace (T_upper, T_lower) and the
+    Y-axis is never allowed to crop below the upper threshold.
 """
 
 import argparse
@@ -94,6 +97,17 @@ DEBOUNCE_MS = 300
 STALE_TOLERANCE_SEC = 0.5
 
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
+
+# Upper / lower AR pole-magnitude thresholds used for spindle detection,
+# per brain region. Drawn as horizontal reference lines on the R trace.
+REGION_THRESHOLDS = {
+    "HPC": {"upper": 0.85, "lower": 0.40},
+    "PL":  {"upper": 0.85, "lower": 0.40},
+    "RSC": {"upper": 0.90, "lower": 0.40},
+}
+
+# Fallback thresholds for regions not listed above.
+DEFAULT_THRESHOLDS = {"upper": 0.85, "lower": 0.40}
 
 # Populated by parse_args() before main() runs.
 VERBOSE = False
@@ -521,6 +535,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
             ("■ AR Spindle Event", "#ff3333"),
             ("■ Wavelet Spindle Event", "#00e5ff"),
             ("— AR Pole R Value", "#ffab40"),
+            ("--- T_upper", "#ff5252"),
+            ("--- T_lower", "#52a0ff"),
         ]:
             lbl = QtWidgets.QLabel(text)
             lbl.setStyleSheet(f"color: {color}; font-weight: bold;")
@@ -555,6 +571,46 @@ class SpindleViewer(QtWidgets.QMainWindow):
             pen=pg.mkPen(color="#ffab40", width=2),
             connect="finite",
         )
+
+        # --- Threshold reference lines --------------------------------- #
+        # Infinite horizontal lines. Their Y values are set per-region by
+        # _refresh_threshold_lines(). They are drawn above the R trace.
+        self.line_upper = pg.InfiniteLine(
+            angle=0,
+            movable=False,
+            pen=pg.mkPen(
+                color=(255, 82, 82, 200),
+                width=1.5,
+                style=QtCore.Qt.DashLine,
+            ),
+            label="T_upper",
+            labelOpts={
+                "position": 0.05,
+                "color": (255, 82, 82),
+                "fill": (0, 0, 0, 120),
+                "movable": False,
+            },
+        )
+        self.line_lower = pg.InfiniteLine(
+            angle=0,
+            movable=False,
+            pen=pg.mkPen(
+                color=(82, 160, 255, 200),
+                width=1.5,
+                style=QtCore.Qt.DashLine,
+            ),
+            label="T_lower",
+            labelOpts={
+                "position": 0.05,
+                "color": (82, 160, 255),
+                "fill": (0, 0, 0, 120),
+                "movable": False,
+            },
+        )
+        self.line_upper.setZValue(15)
+        self.line_lower.setZValue(15)
+        self.p_r.addItem(self.line_upper)
+        self.p_r.addItem(self.line_lower)
 
         # Loading indicator for the R plot.
         self.loading_text = pg.TextItem("", color=(255, 171, 64), anchor=(0.5, 0.5))
@@ -600,6 +656,27 @@ class SpindleViewer(QtWidgets.QMainWindow):
         )
 
         self.p_raw.sigXRangeChanged.connect(self._on_xrange_changed)
+
+    # --------------------------------------------------------------------- #
+    # Threshold lines
+    # --------------------------------------------------------------------- #
+    def _current_thresholds(self):
+        """Return (upper, lower) thresholds for the currently selected region."""
+        region = self.combo_region.currentData()
+        thr = REGION_THRESHOLDS.get(region, DEFAULT_THRESHOLDS)
+        return float(thr["upper"]), float(thr["lower"])
+
+    def _refresh_threshold_lines(self):
+        """Set the upper/lower threshold lines based on the current region."""
+        upper, lower = self._current_thresholds()
+
+        self.line_upper.setValue(upper)
+        self.line_lower.setValue(lower)
+
+        # Extend the R-plot's visible Y range so both threshold lines are
+        # always inside the view.
+        ymax = max(1.05, upper * 1.05)
+        self.p_r.setYRange(0.0, ymax, padding=0)
 
     # --------------------------------------------------------------------- #
     # Data loading
@@ -791,6 +868,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.combo_files.addItem(lbl, userData=orig_idx)
         self.combo_files.blockSignals(False)
 
+        # Reposition the threshold lines for this region.
+        self._refresh_threshold_lines()
+
         if self.combo_files.count() > 0:
             self.on_file_selected(0)
         else:
@@ -884,7 +964,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_raw.setData(self.time_vector, self.raw_signal)
         self.curve_filt.setData(self.time_vector, self.filtered_signal)
         self.curve_r_continuous.clear()
-        self.p_r.setYRange(0.0, 1.05, padding=0)
+
+        upper, _ = self._current_thresholds()
+        self.p_r.setYRange(0.0, max(1.05, upper * 1.05), padding=0)
 
         self.draw_spans()
 
@@ -1044,11 +1126,16 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.p_raw.setXRange(data_lo, data_hi, padding=0)
 
         self.curve_r_continuous.setData(t_arr, r_arr)
+
+        # Y-range: never crop below the region's upper threshold line.
+        upper, _ = self._current_thresholds()
         finite = r_arr[np.isfinite(r_arr)]
-        ymax = max(1.05, float(np.nanmax(finite)) * 1.05) if finite.size else 1.05
+        data_max = float(np.nanmax(finite)) if finite.size else 0.0
+        ymax = max(1.05, upper * 1.05, data_max * 1.05)
         self.p_r.setYRange(0.0, ymax, padding=0)
         vprint(
-            f"[UI] drew AR trace n={len(r_arr)} finite={finite.size} ymax={ymax:.3f}"
+            f"[UI] drew AR trace n={len(r_arr)} finite={finite.size} "
+            f"ymax={ymax:.3f} upper_thr={upper:.3f}"
         )
 
     def _on_window_computation_failed(self, msg):
@@ -1156,7 +1243,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         view_start, view_end = self._centered_view_range(start_s, end_s)
         self.p_raw.setXRange(view_start, view_end, padding=0)
-        self.p_r.setYRange(0.0, 1.05, padding=0)
+
+        upper, _ = self._current_thresholds()
+        self.p_r.setYRange(0.0, max(1.05, upper * 1.05), padding=0)
+
         self.view_update_timer.start(DEBOUNCE_MS)
 
         overlapping = pd.DataFrame()
@@ -1202,7 +1292,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         view_start, view_end = self._centered_view_range(start_s, end_s)
         self.p_raw.setXRange(view_start, view_end, padding=0)
-        self.p_r.setYRange(0.0, 1.05, padding=0)
+
+        upper, _ = self._current_thresholds()
+        self.p_r.setYRange(0.0, max(1.05, upper * 1.05), padding=0)
+
         self.view_update_timer.start(DEBOUNCE_MS)
 
         overlapping = pd.DataFrame()
