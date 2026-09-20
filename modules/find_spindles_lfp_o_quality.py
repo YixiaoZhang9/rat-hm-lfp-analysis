@@ -17,30 +17,28 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
+import statsmodels.api as sm
 from PyQt5 import QtCore, QtGui, QtWidgets
 from scipy.io import loadmat
 from scipy.signal import butter, filtfilt
 
 # --------------------------------------------------------------------------- #
-# Import AR analysis modules
+# Import Preprocessing Modules
 # --------------------------------------------------------------------------- #
-_AR_LIVE_IMPORT_ERROR = None
-try:
-    AR_MODULES_ROOT = os.environ.get(
-        "AR_MODULES_ROOT",
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")),
-    )
-    if AR_MODULES_ROOT not in sys.path:
-        sys.path.append(AR_MODULES_ROOT)
+PROJECT_ROOT = os.environ.get(
+    "AR_MODULES_ROOT",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")),
+)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
+try:
     from modules.ephys_preprocessing import bandpass_filter as ar_bandpass_filter
     from modules.ephys_preprocessing import downsampling as ar_downsampling
-    from modules.find_spindles_lfp_o_quality import fit_ar_on_prepared_signal
-
-    AR_LIVE_ANALYSIS_AVAILABLE = True
-except Exception as _e:
-    AR_LIVE_ANALYSIS_AVAILABLE = False
-    _AR_LIVE_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+    MODULES_AVAILABLE = True
+except ImportError as e:
+    MODULES_AVAILABLE = False
+    _IMPORT_ERROR = str(e)
 
 # --------------------------------------------------------------------------- #
 # Paths & Default Configuration
@@ -60,55 +58,77 @@ AR_TARGET_FS = 128
 AR_ORDER = 8
 AR_SPINDLE_BAND = (BP_LOW, BP_HIGH)
 AR_WINDOW_SEC = 1.0
-AR_STRIDE_SAMPLES = 4
 
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
 
 class ARWindowWorker(QtCore.QThread):
-    """Computes the continuous R-value trace only for the given time slice."""
+    """
+    Computes the continuous R-value trace for the given time slice, using
+    the exact same synchronous loop logic from the working single-viewer.
+    """
     finished_ok = QtCore.pyqtSignal(np.ndarray, np.ndarray)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, raw_signal, start_s, end_s, parent=None):
         super().__init__(parent)
         self.raw_signal = raw_signal
-        self.start_s = start_s
+        self.start_s = max(0.0, start_s)
         self.end_s = end_s
 
     def run(self):
         try:
-            # Add padding to ensure edge windows calculate correctly
+            # We need to extract the signal + 1 second padding so the sliding
+            # window can calculate R-values all the way up to end_s.
             pad = AR_WINDOW_SEC
-            s_idx = max(0, int((self.start_s - pad) * FS))
+            s_idx = int(self.start_s * FS)
             e_idx = min(len(self.raw_signal), int((self.end_s + pad) * FS))
-            chunk = self.raw_signal[s_idx:e_idx]
 
-            if len(chunk) == 0:
+            signal_segment = self.raw_signal[s_idx:e_idx]
+
+            if len(signal_segment) == 0:
                 self.finished_ok.emit(np.array([]), np.array([]))
                 return
 
-            filtered = ar_bandpass_filter(chunk, lowcut=0.1, highcut=100, fs=FS)
-            signal_128 = ar_downsampling(filtered, FS, AR_TARGET_FS)
-
-            # Force n_jobs=1: multiprocessing is slower for tiny array chunks
-            # due to serialization overhead.
-            r_vals, _, starts = fit_ar_on_prepared_signal(
-                signal_128,
-                target_fs=AR_TARGET_FS,
-                ar_order=AR_ORDER,
-                window_sec=AR_WINDOW_SEC,
-                stride_samples=AR_STRIDE_SAMPLES,
-                spindle_band=AR_SPINDLE_BAND,
-                n_jobs=1,
-                verbose=False
+            # 1. Exact Preprocessing
+            filtered_signal = ar_bandpass_filter(
+                signal_segment, lowcut=0.1, highcut=100, fs=FS
             )
+            signal_128 = ar_downsampling(filtered_signal, FS, AR_TARGET_FS)
 
-            chunk_start_t = s_idx / FS
-            half_win = int(AR_WINDOW_SEC * AR_TARGET_FS) / 2.0
-            t_vals = chunk_start_t + (starts + half_win) / AR_TARGET_FS
+            window_samples = int(AR_WINDOW_SEC * AR_TARGET_FS)
+            if len(signal_128) < window_samples:
+                self.finished_ok.emit(np.array([]), np.array([]))
+                return
 
-            self.finished_ok.emit(t_vals, r_vals)
+            total_windows = len(signal_128) - window_samples + 1
+            r_values = np.zeros(total_windows)
+
+            # 2. Exact Burg AR(8) Sliding Window
+            for i in range(total_windows):
+                window = signal_128[i : i + window_samples]
+                try:
+                    a, _ = sm.regression.linear_model.burg(
+                        window, order=AR_ORDER, demean=False
+                    )
+                    poles = np.roots(np.r_[1, -a])
+                    poles = poles[np.imag(poles) > 0]
+
+                    freqs = np.angle(poles) * AR_TARGET_FS / (2 * np.pi)
+                    r_vals = np.abs(poles)
+
+                    mask = (freqs >= AR_SPINDLE_BAND[0]) & (freqs <= AR_SPINDLE_BAND[1])
+                    r_vals = r_vals[mask]
+
+                    if len(r_vals) > 0:
+                        r_values[i] = float(np.max(r_vals))
+                except Exception:
+                    pass
+
+            # 3. Exact Time alignment logic
+            t_vals = self.start_s + np.arange(len(r_values)) / AR_TARGET_FS
+
+            self.finished_ok.emit(t_vals, r_values)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
 
@@ -268,7 +288,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self._ar_signal_thread = None
         self._pending_task = None
 
-        # Debouncer for window panning
+        # Debouncer for window panning (prevents spamming calculation)
         self.view_update_timer = QtCore.QTimer()
         self.view_update_timer.setSingleShot(True)
         self.view_update_timer.timeout.connect(self._start_window_computation)
@@ -349,7 +369,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         lbl_wav_legend.setStyleSheet("color: #00e5ff; font-weight: bold;")
         nav_layout.addWidget(lbl_wav_legend)
 
-        lbl_continuous_legend = QtWidgets.QLabel("— Live AR R-Value")
+        lbl_continuous_legend = QtWidgets.QLabel("— AR Pole R Value")
         lbl_continuous_legend.setStyleSheet("color: #ffab40; font-weight: bold;")
         nav_layout.addWidget(lbl_continuous_legend)
 
@@ -357,23 +377,25 @@ class SpindleViewer(QtWidgets.QMainWindow):
         nav_box.setLayout(nav_layout)
         root_layout.addWidget(nav_box)
 
-        pg.setConfigOptions(antialias=False)
+        pg.setConfigOptions(antialias=True)
         self.graphics_layout = pg.GraphicsLayoutWidget()
         root_layout.addWidget(self.graphics_layout, stretch=1)
 
         self.p_raw = self.graphics_layout.addPlot(row=0, col=0)
         self.p_raw.showGrid(x=True, y=True, alpha=0.3)
-        self.p_raw.setLabel("left", "Raw LFP", units="uV")
+        self.p_raw.setLabel("left", "Amplitude (Raw LFP)", units="uV")
+        self.p_raw.setLabel("bottom", "Time", units="s")
         self.curve_raw = self.p_raw.plot(pen=pg.mkPen(color="#dcdcdc", width=1))
 
         self.p_filt = self.graphics_layout.addPlot(row=1, col=0)
         self.p_filt.showGrid(x=True, y=True, alpha=0.3)
-        self.p_filt.setLabel("left", "10-15 Hz", units="uV")
+        self.p_filt.setLabel("left", "Amplitude (10-15 Hz)", units="uV")
+        self.p_filt.setLabel("bottom", "Time", units="s")
         self.curve_filt = self.p_filt.plot(pen=pg.mkPen(color="#4db6ac", width=1.2))
 
         self.p_r = self.graphics_layout.addPlot(row=2, col=0)
         self.p_r.showGrid(x=True, y=True, alpha=0.3)
-        self.p_r.setLabel("left", "R value")
+        self.p_r.setLabel("left", "R")
         self.p_r.setLabel("bottom", "Time", units="s")
 
         self.curve_r_continuous = self.p_r.plot(
@@ -381,10 +403,11 @@ class SpindleViewer(QtWidgets.QMainWindow):
             connect="finite",
         )
 
-        # Loading Spinner Text
+        # Loading Spinner Element
         self.loading_text = pg.TextItem("", color=(255, 171, 64), anchor=(0.5, 0.5))
         font = QtGui.QFont()
         font.setBold(True)
+        font.setPointSize(12)
         self.loading_text.setFont(font)
         self.p_r.addItem(self.loading_text)
         self.loading_text.hide()
@@ -409,10 +432,18 @@ class SpindleViewer(QtWidgets.QMainWindow):
         QtWidgets.QShortcut(QtGui.QKeySequence("W"), self, self.on_next_wav_event)
         QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, self.on_prev_wav_event)
 
-        # Connect view change to debounce timer
+        # Tie panning to dynamic computation
         self.p_raw.sigXRangeChanged.connect(self._on_xrange_changed)
 
     def load_data(self):
+        if not MODULES_AVAILABLE:
+            self.details_panel.setText(
+                f"Error: Could not import ephys_preprocessing modules.\n"
+                f"Details: {_IMPORT_ERROR}\n"
+                f"Ensure AR_MODULES_ROOT is set correctly."
+            )
+            return
+
         if not os.path.exists(self.manifest_path):
             self.details_panel.setText(
                 f"Manifest not found: {self.manifest_path}\n"
@@ -580,6 +611,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self._ar_signal_thread.quit()
             self._ar_signal_thread.wait()
 
+        self.view_update_timer.stop()
+        self.spinner_timer.stop()
+        self.loading_text.hide()
+
     def _remove_span_items(self):
         for triple in self.region_items:
             for plot, item in zip(self._span_plots, triple):
@@ -640,6 +675,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         file_name = task["File"]
 
+        # Filter AR Data
         if not self.ar_df.empty:
             if "File" in self.ar_df.columns and (self.ar_df["File"] == file_name).any():
                 ar_sub = self.ar_df[self.ar_df["File"] == file_name]
@@ -655,6 +691,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         else:
             self.current_ar_events = pd.DataFrame()
 
+        # Filter Wavelet Data
         if not self.wavelet_df.empty:
             w_df = self.wavelet_df
             wav_sub = w_df[
@@ -716,30 +753,33 @@ class SpindleViewer(QtWidgets.QMainWindow):
         frame = self.spinner_frames[self.spinner_idx]
         self.loading_text.setText(f"Calculating R-values {frame}")
 
-        # Center the text dynamically
+        # Keep it centered in the view
         view_range = self.p_r.viewRange()
         cx = (view_range[0][0] + view_range[0][1]) / 2.0
-        cy = 0.5
+        cy = (view_range[1][0] + view_range[1][1]) / 2.0
+
+        # Fallback if Y range is not fully established yet
+        if view_range[1][0] == 0.0 and view_range[1][1] == 1.0:
+            cy = 0.5
+
         self.loading_text.setPos(cx, cy)
 
     def _start_window_computation(self):
-        if not AR_LIVE_ANALYSIS_AVAILABLE or self.raw_signal is None:
-            if _AR_LIVE_IMPORT_ERROR:
-                self.status_bar.showMessage(f"AR R-profile modules not importable: {_AR_LIVE_IMPORT_ERROR}", 12000)
+        """Triggered automatically 300ms after the plot stops panning."""
+        if not MODULES_AVAILABLE or self.raw_signal is None:
             return
 
         if self._ar_signal_thread is not None and self._ar_signal_thread.isRunning():
             self._ar_signal_thread.quit()
             self._ar_signal_thread.wait()
 
-        # Extract current view range
         view_range = self.p_raw.viewRange()[0]
         start_s, end_s = view_range[0], view_range[1]
 
         # Launch spinner
         self.loading_text.show()
         self.spinner_timer.start(100)
-        self.curve_r_continuous.clear() # Clear out of bounds traces
+        self.curve_r_continuous.clear()
 
         self._ar_signal_thread = ARWindowWorker(self.raw_signal, start_s, end_s)
         self._ar_signal_thread.finished_ok.connect(self._on_window_computation_ready)
@@ -749,7 +789,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
     def _on_window_computation_ready(self, t_vals, r_vals):
         self.spinner_timer.stop()
         self.loading_text.hide()
-        self.curve_r_continuous.setData(t_vals, r_vals)
+
+        if len(t_vals) > 0 and len(t_vals) == len(r_vals):
+            self.curve_r_continuous.setData(t_vals, r_vals)
 
     def _on_window_computation_failed(self, msg):
         self.spinner_timer.stop()
@@ -821,12 +863,14 @@ class SpindleViewer(QtWidgets.QMainWindow):
         half = VIEW_WINDOW_SEC / 2.0
         view_start = center - half
         view_end = center + half
+
         if view_start < 0.0:
             view_start = 0.0
             view_end = min(VIEW_WINDOW_SEC, total_duration)
         if view_end > total_duration:
             view_end = total_duration
             view_start = max(0.0, view_end - VIEW_WINDOW_SEC)
+
         return view_start, view_end
 
     def jump_to_ar_event(self):
@@ -839,7 +883,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         view_start, view_end = self._centered_view_range(start_s, end_s)
 
+        # Setting X range triggers sigXRangeChanged -> debouncer -> calculation
         self.p_raw.setXRange(view_start, view_end, padding=0)
+
+        # Fix Y scale so spinner stays centered
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
         overlapping = pd.DataFrame()
@@ -877,7 +924,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         view_start, view_end = self._centered_view_range(start_s, end_s)
 
+        # Setting X range triggers sigXRangeChanged -> debouncer -> calculation
         self.p_raw.setXRange(view_start, view_end, padding=0)
+
+        # Fix Y scale so spinner stays centered
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
         overlapping = pd.DataFrame()
