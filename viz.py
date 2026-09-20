@@ -1,6 +1,28 @@
+#!/usr/bin/env python3
+"""
+Spindle Alignment Inspector (AR vs Wavelet)
+
+Lets you page through detected spindle events from two detectors (an
+autoregressive/"AR" detector and a wavelet detector) overlaid on the raw and
+band-passed LFP trace for a given rat / region / recording.
+
+Usage:
+    python spindle_viewer.py \
+        --manifest /path/to/tasks_manifest.csv \
+        --ar-csv /path/to/all_detected_spindles_per_region.csv \
+        --wavelet-csv /path/to/wavelet_spindles_with_ar_dynamics.csv
+
+Paths can also be supplied via environment variables (SPINDLE_MANIFEST,
+SPINDLE_AR_CSV, SPINDLE_WAVELET_CSV) so the script isn't tied to one
+machine's directory layout. If nothing is supplied, the tool still starts
+and lets you know what's missing instead of crashing on launch.
+"""
+
+import argparse
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -13,17 +35,18 @@ from scipy.signal import butter, filtfilt
 # --------------------------------------------------------------------------- #
 # Paths & Default Configuration
 # --------------------------------------------------------------------------- #
-DEFAULT_MANIFEST = "/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/tasks_manifest.csv"
-DEFAULT_AR_CSV = "results/all_detected_spindles_per_region.csv"
-DEFAULT_WAVELET_CSV = (
-    "/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/results_ar_calibration/"
-    "wavelet_spindles_with_ar_dynamics.csv"
+DEFAULT_MANIFEST = os.environ.get("SPINDLE_MANIFEST", "tasks_manifest.csv")
+DEFAULT_AR_CSV = os.environ.get("SPINDLE_AR_CSV", "results/all_detected_spindles_per_region.csv")
+DEFAULT_WAVELET_CSV = os.environ.get(
+    "SPINDLE_WAVELET_CSV", "results_ar_calibration/wavelet_spindles_with_ar_dynamics.csv"
 )
 
 FS = 1000.0
 BP_LOW = 10.0
 BP_HIGH = 15.0
 VIEW_PADDING_SEC = 2.5
+
+REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
 
 def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
@@ -61,17 +84,40 @@ def parse_channel_trial(data_path: str):
     return chan, trial
 
 
-def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0) -> pd.DataFrame:
+def safe_float(val, default=np.nan):
+    """Coerce a value to float, never raising, for safe display formatting."""
+    try:
+        f = float(val)
+        if np.isnan(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
+def fmt(val, spec=".4f", placeholder="N/A"):
+    """Format a possibly-missing/non-numeric value without ever crashing the UI."""
+    f = safe_float(val)
+    if np.isnan(f):
+        return placeholder
+    return format(f, spec)
+
+
+def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
     """
     Scans for possible column names indicating start/end times or sample indices
     and converts them to seconds (Start_s and End_s).
+
+    Returns (df, resolved) where `resolved` is False if no usable start/end
+    columns could be found (Start_s/End_s were filled with 0.0 as a
+    fallback) so callers can warn the user instead of silently drawing
+    zero-length/zero-position regions.
     """
     if df.empty:
-        return df
+        return df, True
 
     cols_lower = {str(c).lower().strip(): c for c in df.columns}
 
-    # Priority-ordered possible headers
     start_candidates = [
         "start_s", "start_time", "start_sec", "start_secs", "start",
         "start_time_s", "spindle_start", "onset_s", "onset_time",
@@ -83,26 +129,13 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0) -> pd
         "end_sample", "end_idx", "end_sample_idx", "end_pts"
     ]
 
-    found_start = None
-    found_end = None
-
-    for cand in start_candidates:
-        if cand in cols_lower:
-            found_start = cols_lower[cand]
-            break
-
-    for cand in end_candidates:
-        if cand in cols_lower:
-            found_end = cols_lower[cand]
-            break
+    found_start = next((cols_lower[c] for c in start_candidates if c in cols_lower), None)
+    found_end = next((cols_lower[c] for c in end_candidates if c in cols_lower), None)
 
     if found_start and found_end:
         starts = pd.to_numeric(df[found_start], errors="coerce").fillna(0.0).values
         ends = pd.to_numeric(df[found_end], errors="coerce").fillna(0.0).values
 
-        # Detect if coordinates are raw sample indices or seconds
-        # Typical recording durations in seconds are rarely > 86400, while sample indices
-        # will quickly exceed thousands.
         durations = ends - starts
         median_dur = np.nanmedian(durations) if len(durations) > 0 else 0
 
@@ -112,25 +145,57 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0) -> pd
         else:
             df["Start_s"] = starts
             df["End_s"] = ends
-    else:
-        # Fallback: check if duration and peak/start are available
-        if "start_s" not in df.columns:
-            df["Start_s"] = 0.0
-        if "end_s" not in df.columns:
-            df["End_s"] = 0.0
+        return df, True
 
-    return df
+    # Fallback: nothing usable found.
+    if "start_s" not in df.columns:
+        df["Start_s"] = 0.0
+    if "end_s" not in df.columns:
+        df["End_s"] = 0.0
+    return df, False
+
+
+class SignalLoader(QtCore.QThread):
+    """Loads a .mat trace and band-pass filters it off the GUI thread so large
+    recordings don't freeze the interface while filtfilt runs."""
+
+    finished_ok = QtCore.pyqtSignal(np.ndarray, np.ndarray)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, data_path, parent=None):
+        super().__init__(parent)
+        self.data_path = data_path
+
+    def run(self):
+        try:
+            mat_data = loadmat(self.data_path)
+            if "data" not in mat_data:
+                raise KeyError(
+                    f"'.mat' file has no 'data' variable (found: "
+                    f"{[k for k in mat_data.keys() if not k.startswith('__')]})"
+                )
+            raw = mat_data["data"].squeeze().astype(np.float32)
+            if raw.ndim != 1:
+                raw = raw.reshape(-1)
+            filtered = butter_bandpass_filter(raw, BP_LOW, BP_HIGH, FS).astype(np.float32)
+            self.finished_ok.emit(raw, filtered)
+        except Exception as e:  # noqa: BLE001 - surface any failure to the UI
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class SpindleViewer(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, manifest_path, ar_csv_path, wavelet_csv_path):
         super().__init__()
         self.setWindowTitle("Spindle Alignment Inspector (AR vs Wavelet)")
         self.resize(1500, 950)
 
+        self.manifest_path = manifest_path
+        self.ar_csv_path = ar_csv_path
+        self.wavelet_csv_path = wavelet_csv_path
+
         self.manifest_df = None
-        self.ar_df = None
-        self.wavelet_df = None
+        self.ar_df = pd.DataFrame()
+        self.wavelet_df = pd.DataFrame()
 
         self.current_ar_events = pd.DataFrame()
         self.current_wavelet_events = pd.DataFrame()
@@ -142,9 +207,13 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.time_vector = None
         self.data_len = 0
 
+        self._loader_thread = None
+        self._pending_task = None  # manifest row awaiting async load completion
+
         self.init_ui()
         self.load_data()
 
+    # ------------------------------------------------------------------ UI ---
     def init_ui(self):
         main_widget = QtWidgets.QWidget()
         self.setCentralWidget(main_widget)
@@ -247,6 +316,11 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.p_filt.setXLink(self.p_raw)
         self.p_r.setXLink(self.p_raw)
+        # Plots that each region-span triple maps onto, in the same order
+        # draw_spans/clear_plots create the triples in. Keeping this explicit
+        # avoids relying on item.getViewBox(), which can raise once an item
+        # has already been detached from its view.
+        self._span_plots = (self.p_raw, self.p_filt, self.p_r)
         self.region_items = []
 
         # Info Box
@@ -258,46 +332,80 @@ class SpindleViewer(QtWidgets.QMainWindow):
         )
         root_layout.addWidget(self.details_panel)
 
+        self.status_bar = self.statusBar()
+
         # Shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, self.on_prev_ar_event)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, self.on_next_ar_event)
         QtWidgets.QShortcut(QtGui.QKeySequence("W"), self, self.on_next_wav_event)
         QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self, self.on_prev_wav_event)
 
+    # -------------------------------------------------------------- Loading ---
     def load_data(self):
-        if not os.path.exists(DEFAULT_MANIFEST):
-            self.details_panel.setText(f"Manifest not found: {DEFAULT_MANIFEST}")
+        if not os.path.exists(self.manifest_path):
+            self.details_panel.setText(
+                f"Manifest not found: {self.manifest_path}\n"
+                f"Pass --manifest, or set SPINDLE_MANIFEST, to point at your tasks CSV."
+            )
             return
 
-        self.manifest_df = pd.read_csv(DEFAULT_MANIFEST)
-        self.manifest_df["Rat"] = self.manifest_df["rat"].astype(int)
+        try:
+            self.manifest_df = pd.read_csv(self.manifest_path)
+        except Exception as e:
+            self.details_panel.setText(f"Failed to read manifest CSV: {e}")
+            return
+
+        missing = REQUIRED_MANIFEST_COLS - set(c.lower() for c in self.manifest_df.columns)
+        if missing:
+            self.details_panel.setText(
+                f"Manifest is missing required column(s): {sorted(missing)}. "
+                f"Expected at least: {sorted(REQUIRED_MANIFEST_COLS)}"
+            )
+            self.manifest_df = None
+            return
+
+        rat_numeric = pd.to_numeric(self.manifest_df["rat"], errors="coerce")
+        bad_rats = int(rat_numeric.isna().sum())
+        if bad_rats:
+            self.status_bar.showMessage(
+                f"Warning: dropped {bad_rats} manifest row(s) with a non-numeric 'rat' value.", 8000
+            )
+        self.manifest_df = self.manifest_df.loc[rat_numeric.notna()].copy()
+        self.manifest_df["Rat"] = rat_numeric.loc[rat_numeric.notna()].astype(int)
         self.manifest_df["Region"] = self.manifest_df["region"].astype(str).str.strip()
         self.manifest_df["Date"] = self.manifest_df["date"].apply(clean_str)
 
         parsed = self.manifest_df["data_path"].apply(parse_channel_trial)
         self.manifest_df["channel"] = parsed.apply(lambda x: x[0])
         self.manifest_df["trial"] = parsed.apply(lambda x: clean_str(x[1]))
-        self.manifest_df["File"] = self.manifest_df["data_path"].apply(lambda p: Path(p).name)
+        self.manifest_df["File"] = self.manifest_df["data_path"].apply(lambda p: Path(str(p)).name)
+
+        if self.manifest_df.empty:
+            self.details_panel.setText("Manifest loaded but contains no usable rows.")
+            return
 
         # AR Loading
-        if os.path.exists(DEFAULT_AR_CSV):
-            self.ar_df = pd.read_csv(DEFAULT_AR_CSV)
-            self.ar_df["Rat"] = self.ar_df["Rat"].astype(int)
-            self.ar_df["Region"] = self.ar_df["Region"].astype(str).str.strip()
-            self.ar_df["Date"] = self.ar_df["Date"].apply(clean_str)
-            if "File" in self.ar_df.columns:
-                self.ar_df["File"] = self.ar_df["File"].apply(lambda p: Path(str(p)).name)
-            self.ar_df = resolve_interval_columns(self.ar_df, FS)
-        else:
-            self.ar_df = pd.DataFrame()
+        self.ar_df = self._load_detection_csv(self.ar_csv_path, kind="AR")
 
         # Wavelet Loading
-        if os.path.exists(DEFAULT_WAVELET_CSV):
-            self.wavelet_df = pd.read_csv(DEFAULT_WAVELET_CSV)
+        self.wavelet_df = self._load_detection_csv(self.wavelet_csv_path, kind="Wavelet", is_wavelet=True)
 
-            # Normalize headers
+        self.populate_rat_selector()
+
+    def _load_detection_csv(self, path, kind, is_wavelet=False):
+        if not path or not os.path.exists(path):
+            self.status_bar.showMessage(f"{kind} detections CSV not found ({path}); continuing without it.", 8000)
+            return pd.DataFrame()
+
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            self.status_bar.showMessage(f"Failed to read {kind} CSV ({path}): {e}", 8000)
+            return pd.DataFrame()
+
+        if is_wavelet:
             rename_map = {}
-            for col in self.wavelet_df.columns:
+            for col in df.columns:
                 clow = col.lower().strip()
                 if clow in ["rat", "rat_number", "rat_id"]:
                     rename_map[col] = "Rat"
@@ -309,29 +417,33 @@ class SpindleViewer(QtWidgets.QMainWindow):
                     rename_map[col] = "channel"
                 elif clow in ["trial", "trial_id", "recording"]:
                     rename_map[col] = "trial"
+            df = df.rename(columns=rename_map)
 
-            self.wavelet_df = self.wavelet_df.rename(columns=rename_map)
-
-            if "Rat" in self.wavelet_df.columns:
-                self.wavelet_df["Rat"] = pd.to_numeric(self.wavelet_df["Rat"], errors="coerce").fillna(0).astype(int)
-            if "Region" in self.wavelet_df.columns:
-                self.wavelet_df["Region"] = self.wavelet_df["Region"].astype(str).str.strip()
-            if "Date" in self.wavelet_df.columns:
-                self.wavelet_df["Date"] = self.wavelet_df["Date"].apply(clean_str)
-            if "channel" in self.wavelet_df.columns:
-                self.wavelet_df["channel"] = self.wavelet_df["channel"].apply(normalize_channel)
-            else:
-                self.wavelet_df["channel"] = ""
-            if "trial" in self.wavelet_df.columns:
-                self.wavelet_df["trial"] = self.wavelet_df["trial"].apply(clean_str)
-            else:
-                self.wavelet_df["trial"] = ""
-
-            self.wavelet_df = resolve_interval_columns(self.wavelet_df, FS)
+            if "Rat" in df.columns:
+                df["Rat"] = pd.to_numeric(df["Rat"], errors="coerce").fillna(-1).astype(int)
+            if "Region" in df.columns:
+                df["Region"] = df["Region"].astype(str).str.strip()
+            if "Date" in df.columns:
+                df["Date"] = df["Date"].apply(clean_str)
+            df["channel"] = df["channel"].apply(normalize_channel) if "channel" in df.columns else ""
+            df["trial"] = df["trial"].apply(clean_str) if "trial" in df.columns else ""
         else:
-            self.wavelet_df = pd.DataFrame()
+            if "Rat" in df.columns:
+                df["Rat"] = pd.to_numeric(df["Rat"], errors="coerce").fillna(-1).astype(int)
+            if "Region" in df.columns:
+                df["Region"] = df["Region"].astype(str).str.strip()
+            if "Date" in df.columns:
+                df["Date"] = df["Date"].apply(clean_str)
+            if "File" in df.columns:
+                df["File"] = df["File"].apply(lambda p: Path(str(p)).name)
 
-        self.populate_rat_selector()
+        df, resolved = resolve_interval_columns(df, FS)
+        if not df.empty and not resolved:
+            self.status_bar.showMessage(
+                f"Warning: couldn't find start/end time columns in {kind} CSV; "
+                f"events from it will not be positioned correctly.", 10000
+            )
+        return df
 
     def populate_rat_selector(self):
         rats = sorted(self.manifest_df["Rat"].unique().tolist())
@@ -360,6 +472,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         if regions:
             self.on_region_changed(0)
+        else:
+            self.clear_plots()
 
     def on_region_changed(self, index):
         if index < 0 or self.manifest_df is None:
@@ -389,16 +503,23 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_raw.clear()
         self.curve_filt.clear()
         self.curve_r.clear()
-        for r in self.region_items:
-            for item in r:
-                item.getViewBox().removeItem(item)
-        self.region_items.clear()
+        self._remove_span_items()
         self.current_ar_events = pd.DataFrame()
         self.current_wavelet_events = pd.DataFrame()
         self.lbl_ar_tracker.setText("AR: 0 / 0")
         self.lbl_wav_tracker.setText("WAV: 0 / 0")
         self.details_panel.setText("No recordings match current Rat and Region filters.")
 
+    def _remove_span_items(self):
+        for triple in self.region_items:
+            for plot, item in zip(self._span_plots, triple):
+                try:
+                    plot.removeItem(item)
+                except Exception:
+                    pass
+        self.region_items.clear()
+
+    # ---------------------------------------------------------- File select ---
     def on_file_selected(self, index):
         if index < 0 or self.manifest_df is None or self.combo_files.count() == 0:
             return
@@ -414,17 +535,40 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.details_panel.setText(f"File missing on disk: {data_path}")
             return
 
-        try:
-            mat_data = loadmat(data_path)
-            self.raw_signal = mat_data["data"].squeeze().astype(np.float32)
-            self.data_len = len(self.raw_signal)
-            self.time_vector = np.arange(self.data_len, dtype=np.float32) / FS
-            self.filtered_signal = butter_bandpass_filter(
-                self.raw_signal, BP_LOW, BP_HIGH, FS
-            )
-        except Exception as e:
-            self.details_panel.setText(f"Signal processing error: {str(e)}")
+        # Kick off async load/filter so the UI doesn't freeze on large files.
+        self._pending_task = task
+        self.combo_files.setEnabled(False)
+        self.status_bar.showMessage(f"Loading {Path(data_path).name} ...")
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+
+        if self._loader_thread is not None and self._loader_thread.isRunning():
+            self._loader_thread.quit()
+            self._loader_thread.wait()
+
+        self._loader_thread = SignalLoader(data_path)
+        self._loader_thread.finished_ok.connect(self._on_signal_loaded)
+        self._loader_thread.failed.connect(self._on_signal_load_failed)
+        self._loader_thread.start()
+
+    def _on_signal_load_failed(self, message):
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self.combo_files.setEnabled(True)
+        self.status_bar.clearMessage()
+        self.details_panel.setText(f"Signal processing error: {message}")
+
+    def _on_signal_loaded(self, raw_signal, filtered_signal):
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self.combo_files.setEnabled(True)
+        self.status_bar.clearMessage()
+
+        task = self._pending_task
+        if task is None:
             return
+
+        self.raw_signal = raw_signal
+        self.filtered_signal = filtered_signal
+        self.data_len = len(self.raw_signal)
+        self.time_vector = np.arange(self.data_len, dtype=np.float32) / FS
 
         file_name = task["File"]
 
@@ -438,55 +582,47 @@ class SpindleViewer(QtWidgets.QMainWindow):
                     & (self.ar_df["Region"] == task["Region"])
                     & (self.ar_df["Date"] == task["Date"])
                 ]
-
-            if not ar_sub.empty and "Start_s" in ar_sub.columns:
-                self.current_ar_events = ar_sub.sort_values("Start_s").reset_index(drop=True)
-            else:
-                self.current_ar_events = pd.DataFrame()
+            self.current_ar_events = (
+                ar_sub.sort_values("Start_s").reset_index(drop=True) if not ar_sub.empty else pd.DataFrame()
+            )
         else:
             self.current_ar_events = pd.DataFrame()
 
         # Filter Wavelet detections with graceful fallbacks
         if not self.wavelet_df.empty:
             w_df = self.wavelet_df
-
-            # Tier 1: Rat + Region + Date
             wav_sub = w_df[
                 (w_df["Rat"] == task["Rat"])
                 & (w_df["Region"] == task["Region"])
                 & (w_df["Date"] == task["Date"])
             ]
 
-            # Tier 2: Restrict by Channel if matches exist
             if not wav_sub.empty and task["channel"]:
                 chan_match = wav_sub[wav_sub["channel"] == task["channel"]]
                 if not chan_match.empty:
                     wav_sub = chan_match
 
-            # Tier 3: Restrict by Trial if present and non-empty
             if not wav_sub.empty and task["trial"]:
                 trial_match = wav_sub[wav_sub["trial"] == task["trial"]]
                 if not trial_match.empty:
                     wav_sub = trial_match
 
-            if not wav_sub.empty and "Start_s" in wav_sub.columns:
-                self.current_wavelet_events = wav_sub.sort_values("Start_s").reset_index(drop=True)
-            else:
-                self.current_wavelet_events = pd.DataFrame()
+            self.current_wavelet_events = (
+                wav_sub.sort_values("Start_s").reset_index(drop=True) if not wav_sub.empty else pd.DataFrame()
+            )
         else:
             self.current_wavelet_events = pd.DataFrame()
 
         self.curve_raw.setData(self.time_vector, self.raw_signal)
         self.curve_filt.setData(self.time_vector, self.filtered_signal)
 
-        # Plot R-values
         if not self.current_ar_events.empty and "Max_R" in self.current_ar_events.columns:
             x_pts = (
                 self.current_ar_events["Peak_s"].values
                 if "Peak_s" in self.current_ar_events.columns
                 else self.current_ar_events["Start_s"].values
             )
-            y_pts = self.current_ar_events["Max_R"].values
+            y_pts = pd.to_numeric(self.current_ar_events["Max_R"], errors="coerce").values
             self.curve_r.setData(x_pts, y_pts)
         else:
             self.curve_r.clear()
@@ -514,53 +650,45 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 f"No spindle detections found for this recording."
             )
 
+    # -------------------------------------------------------------- Drawing ---
     def draw_spans(self):
-        for r in self.region_items:
-            self.p_raw.removeItem(r[0])
-            self.p_filt.removeItem(r[1])
-            self.p_r.removeItem(r[2])
-        self.region_items.clear()
+        self._remove_span_items()
 
         # 1. Overlay Wavelet detections (High visibility Cyan, zValue=5)
         if not self.current_wavelet_events.empty:
             for _, row in self.current_wavelet_events.iterrows():
-                s, e = float(row["Start_s"]), float(row["End_s"])
-                r1 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(0, 229, 255, 90),
-                                         pen=pg.mkPen(color=(0, 229, 255, 230), width=1.8, style=QtCore.Qt.DashLine))
-                r2 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(0, 229, 255, 90),
-                                         pen=pg.mkPen(color=(0, 229, 255, 230), width=1.8, style=QtCore.Qt.DashLine))
-                r3 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(0, 229, 255, 90),
-                                         pen=pg.mkPen(color=(0, 229, 255, 230), width=1.8, style=QtCore.Qt.DashLine))
-                for r_item in (r1, r2, r3):
+                s, e = safe_float(row["Start_s"], 0.0), safe_float(row["End_s"], 0.0)
+                triple = tuple(
+                    pg.LinearRegionItem(
+                        [s, e], movable=False,
+                        brush=QtGui.QColor(0, 229, 255, 90),
+                        pen=pg.mkPen(color=(0, 229, 255, 230), width=1.8, style=QtCore.Qt.DashLine),
+                    )
+                    for _ in range(3)
+                )
+                for r_item, plot in zip(triple, self._span_plots):
                     r_item.setZValue(5)
-                self.p_raw.addItem(r1)
-                self.p_filt.addItem(r2)
-                self.p_r.addItem(r3)
-                self.region_items.append((r1, r2, r3))
+                    plot.addItem(r_item)
+                self.region_items.append(triple)
 
         # 2. Overlay AR detections (Red/Orange, zValue=10)
         if not self.current_ar_events.empty:
             for _, row in self.current_ar_events.iterrows():
-                s, e = float(row["Start_s"]), float(row["End_s"])
-                r1 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(255, 50, 50, 80),
-                                         pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5))
-                r2 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(255, 50, 50, 80),
-                                         pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5))
-                r3 = pg.LinearRegionItem([s, e], movable=False,
-                                         brush=QtGui.QColor(255, 50, 50, 80),
-                                         pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5))
-                for r_item in (r1, r2, r3):
+                s, e = safe_float(row["Start_s"], 0.0), safe_float(row["End_s"], 0.0)
+                triple = tuple(
+                    pg.LinearRegionItem(
+                        [s, e], movable=False,
+                        brush=QtGui.QColor(255, 50, 50, 80),
+                        pen=pg.mkPen(color=(255, 50, 50, 230), width=1.5),
+                    )
+                    for _ in range(3)
+                )
+                for r_item, plot in zip(triple, self._span_plots):
                     r_item.setZValue(10)
-                self.p_raw.addItem(r1)
-                self.p_filt.addItem(r2)
-                self.p_r.addItem(r3)
-                self.region_items.append((r1, r2, r3))
+                    plot.addItem(r_item)
+                self.region_items.append(triple)
 
+    # ----------------------------------------------------------- Navigation ---
     def on_prev_ar_event(self):
         if len(self.current_ar_events) == 0:
             return
@@ -590,8 +718,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
             return
 
         event = self.current_ar_events.iloc[self.current_ar_idx]
-        start_s = float(event["Start_s"])
-        end_s = float(event["End_s"])
+        start_s = safe_float(event["Start_s"], 0.0)
+        end_s = safe_float(event["End_s"], 0.0)
 
         view_start = max(0.0, start_s - VIEW_PADDING_SEC)
         view_end = min(self.data_len / FS, end_s + VIEW_PADDING_SEC)
@@ -617,7 +745,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         info = (
             f"[Focus: AR Spindle #{self.current_ar_idx + 1}/{len(self.current_ar_events)}] "
             f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)\n"
-            f"AR Metrics: Max R = {r_val:.4f} | Peak Freq = {freq_val:.2f} Hz\n"
+            f"AR Metrics: Max R = {fmt(r_val)} | Peak Freq = {fmt(freq_val, '.2f')} Hz\n"
             f"Alignment Status: {align_desc}"
         )
         self.details_panel.setText(info)
@@ -628,8 +756,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
             return
 
         event = self.current_wavelet_events.iloc[self.current_wav_idx]
-        start_s = float(event["Start_s"])
-        end_s = float(event["End_s"])
+        start_s = safe_float(event["Start_s"], 0.0)
+        end_s = safe_float(event["End_s"], 0.0)
 
         view_start = max(0.0, start_s - VIEW_PADDING_SEC)
         view_end = min(self.data_len / FS, end_s + VIEW_PADDING_SEC)
@@ -658,7 +786,19 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.lbl_wav_tracker.setText(f"WAV: {self.current_wav_idx + 1} / {len(self.current_wavelet_events)}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Spindle Alignment Inspector (AR vs Wavelet)")
+    parser.add_argument("--manifest", default=DEFAULT_MANIFEST, help="Path to tasks_manifest.csv")
+    parser.add_argument("--ar-csv", default=DEFAULT_AR_CSV, help="Path to AR-detected spindles CSV")
+    parser.add_argument("--wavelet-csv", default=DEFAULT_WAVELET_CSV, help="Path to wavelet-detected spindles CSV")
+    # Ignore unknown args so this still works fine under Qt's own arg parsing.
+    args, _ = parser.parse_known_args()
+    return args
+
+
 def main():
+    args = parse_args()
+
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
 
@@ -676,7 +816,13 @@ def main():
     dark_palette.setColor(QtGui.QPalette.HighlightedText, QtCore.Qt.black)
     app.setPalette(dark_palette)
 
-    viewer = SpindleViewer()
+    def excepthook(exc_type, exc_value, exc_tb):
+        # Keep unexpected exceptions from silently killing the Qt event loop.
+        traceback.print_exception(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = excepthook
+
+    viewer = SpindleViewer(args.manifest, args.ar_csv, args.wavelet_csv)
     viewer.show()
     sys.exit(app.exec_())
 
