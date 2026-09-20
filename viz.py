@@ -48,6 +48,35 @@ VIEW_PADDING_SEC = 2.5
 
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
+# The wavelet CSV carries a within-event R trend sampled at these relative
+# positions (r_profile_0% .. r_profile_100%). We use these to draw a real
+# up/down R curve across each event's [Start_s, End_s] span, rather than a
+# single summary point.
+PROFILE_PERCENTS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+PROFILE_COLS = [f"r_profile_{p}%" for p in PROFILE_PERCENTS]
+
+
+def build_profile_curve(events_df: pd.DataFrame):
+    """Builds a single (x, y) pair tracing the R profile across every event in
+    events_df, in time order, with NaN gaps between events so the line does
+    not connect across the silence between spindles."""
+    if events_df.empty or not all(c in events_df.columns for c in PROFILE_COLS):
+        return np.array([]), np.array([])
+
+    xs, ys = [], []
+    for _, row in events_df.iterrows():
+        s = safe_float(row.get("Start_s"))
+        e = safe_float(row.get("End_s"))
+        if np.isnan(s) or np.isnan(e) or e <= s:
+            continue
+        t = np.linspace(s, e, len(PROFILE_COLS))
+        vals = [safe_float(row.get(c)) for c in PROFILE_COLS]
+        xs.extend(t.tolist())
+        ys.extend(vals)
+        xs.append(np.nan)
+        ys.append(np.nan)
+    return np.array(xs, dtype=float), np.array(ys, dtype=float)
+
 
 def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
     nyq = 0.5 * fs
@@ -305,6 +334,14 @@ class SpindleViewer(QtWidgets.QMainWindow):
         lbl_wav_legend.setStyleSheet("color: #00e5ff; font-weight: bold;")
         nav_layout.addWidget(lbl_wav_legend)
 
+        lbl_rprofile_legend = QtWidgets.QLabel("— R profile (per wavelet event)")
+        lbl_rprofile_legend.setStyleSheet("color: #26c6da; font-weight: bold;")
+        nav_layout.addWidget(lbl_rprofile_legend)
+
+        lbl_maxr_legend = QtWidgets.QLabel("● Max R (per AR event)")
+        lbl_maxr_legend.setStyleSheet("color: #ff5722; font-weight: bold;")
+        nav_layout.addWidget(lbl_maxr_legend)
+
         nav_layout.addStretch(1)
         nav_box.setLayout(nav_layout)
         root_layout.addWidget(nav_box)
@@ -326,8 +363,19 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.p_r = self.graphics_layout.addPlot(row=2, col=0)
         self.p_r.showGrid(x=True, y=True, alpha=0.3)
-        self.p_r.setLabel("left", "Max R")
+        self.p_r.setLabel("left", "R value")
         self.p_r.setLabel("bottom", "Time", units="s")
+        # Continuous R trend traced across each wavelet event's own duration,
+        # from its r_profile_0%..100% columns. This is real per-event data
+        # from the wavelet CSV, not an estimate.
+        self.curve_r_profile = self.p_r.plot(
+            pen=pg.mkPen(color="#26c6da", width=2),
+            connect="finite",
+        )
+        # One summary point (Max_R) per AR-detected event. Left as isolated
+        # markers rather than connected by a line: AR only gives us one R
+        # value per detected event, so a line between events would imply a
+        # measured value in between that was never actually computed.
         self.curve_r = self.p_r.plot(
             pen=None,
             symbol="o",
@@ -525,6 +573,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_raw.clear()
         self.curve_filt.clear()
         self.curve_r.clear()
+        self.curve_r_profile.clear()
         self._remove_span_items()
         self.current_ar_events = pd.DataFrame()
         self.current_wavelet_events = pd.DataFrame()
@@ -648,6 +697,12 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.curve_r.setData(x_pts, y_pts)
         else:
             self.curve_r.clear()
+
+        x_prof, y_prof = build_profile_curve(self.current_wavelet_events)
+        if len(x_prof):
+            self.curve_r_profile.setData(x_prof, y_prof)
+        else:
+            self.curve_r_profile.clear()
 
         self.draw_spans()
 
