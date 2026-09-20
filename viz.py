@@ -129,8 +129,25 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
         "end_sample", "end_idx", "end_sample_idx", "end_pts"
     ]
 
-    found_start = next((cols_lower[c] for c in start_candidates if c in cols_lower), None)
-    found_end = next((cols_lower[c] for c in end_candidates if c in cols_lower), None)
+    def find_column(candidates):
+        # Pass 1: exact header match (case-insensitive), in priority order.
+        for cand in candidates:
+            if cand in cols_lower:
+                return cols_lower[cand]
+        # Pass 2: substring match, still in priority order, so a specific
+        # candidate like "start_time" is preferred over a generic one like
+        # "start" even when both would technically match. This lets headers
+        # like "spindle_start_time_s" resolve correctly without accidentally
+        # grabbing an unrelated column such as "nrem_bout_start_index" that
+        # merely happens to contain "start".
+        for cand in candidates:
+            for lower_name, orig_name in cols_lower.items():
+                if cand in lower_name:
+                    return orig_name
+        return None
+
+    found_start = find_column(start_candidates)
+    found_end = find_column(end_candidates)
 
     if found_start and found_end:
         starts = pd.to_numeric(df[found_start], errors="coerce").fillna(0.0).values
@@ -139,7 +156,12 @@ def resolve_interval_columns(df: pd.DataFrame, default_fs: float = 1000.0):
         durations = ends - starts
         median_dur = np.nanmedian(durations) if len(durations) > 0 else 0
 
-        if median_dur > 20.0 or ("sample" in found_start.lower()) or ("idx" in found_start.lower()):
+        if (
+            median_dur > 20.0
+            or "sample" in found_start.lower()
+            or "idx" in found_start.lower()
+            or "index" in found_start.lower()
+        ):
             df["Start_s"] = starts / default_fs
             df["End_s"] = ends / default_fs
         else:
