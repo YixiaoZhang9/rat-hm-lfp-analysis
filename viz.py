@@ -6,27 +6,16 @@ Page through detected spindle events from two detectors overlaid on the raw
 LFP, band-passed LFP, and a continuous AR R-value trace dynamically computed
 for the active view window.
 
-Architecture notes:
-  * AR trace is computed on a background QThread (ARWindowWorker) for the
-    currently visible X range plus a small padding window. The worker echoes
-    back the range it computed for; the UI thread discards any result whose
-    requested range no longer matches the current view (stale-result
-    rejection).
-  * The R value recorded per AR window is the magnitude of the pole whose
-    frequency is closest to the spindle band center (12.5 Hz). This gives a
-    dense, continuous trace. The strict in-band presence is tracked
-    separately as a diagnostic.
-  * Raw / filtered / downsampled signals are sanitized at every stage so a
-    single NaN cannot poison every Burg window. r_values is initialized with
-    NaN so failures are visible as gaps rather than a misleading flat line.
-  * Region-specific upper / lower detection thresholds are drawn as dashed
-    horizontal reference lines on the R trace (T_upper, T_lower). They update
-    whenever the Region combo changes and the Y-axis is never allowed to crop
-    below the upper threshold.
-  * Navigation is time-synced: when the user jumps to the next AR event, the
-    Wavelet tracker jumps to whichever of its events is nearest in time to
-    the new view center (and vice versa). Both trackers therefore always
-    describe the same time window on screen.
+The AR trace is computed with the exact same pipeline that the extraction
+script uses via find_spindles_lfp() so the live trace and the CSV events agree:
+
+    1. bandpass_filter(raw, lowcut=0.1, highcut=100, fs=1000)
+    2. downsampling(filtered, 1000, 128)
+    3. sliding 1.0 s window @ 128 Hz, stride_samples=4
+    4. burg(order=8, demean=False), poles with imag>0
+    5. per-window R = max |pole| over poles with frequency in [10, 15] Hz,
+       or 0.0 if no in-band pole
+    6. time axis = (start_sample + window_samples/2) / 128
 """
 
 import argparse
@@ -66,7 +55,8 @@ except ImportError as e:
     _IMPORT_ERROR = str(e)
 
 # --------------------------------------------------------------------------- #
-# Configuration
+# Configuration — must mirror find_spindles_lfp() defaults and the extraction
+# script's call so the live trace reproduces the CSV events.
 # --------------------------------------------------------------------------- #
 DEFAULT_MANIFEST = os.environ.get("SPINDLE_MANIFEST", "tasks_manifest.csv")
 DEFAULT_AR_CSV = os.environ.get(
@@ -85,35 +75,27 @@ VIEW_WINDOW_SEC = 10.0
 AR_TARGET_FS = 128
 AR_ORDER = 8
 AR_SPINDLE_BAND = (BP_LOW, BP_HIGH)
-AR_BAND_CENTER = 0.5 * (AR_SPINDLE_BAND[0] + AR_SPINDLE_BAND[1])
 AR_WINDOW_SEC = 1.0
+AR_STRIDE_SAMPLES = 4              # matches extraction script's STRIDE
+AR_PRE_LOWCUT = 0.1
+AR_PRE_HIGHCUT = 100.0
 
-# Compute-window padding so the final 1 s AR window of the visible range has
-# enough data to complete.
-AR_PAD_SEC = AR_WINDOW_SEC
+# Extra padding beyond the visible window so the final AR window can complete.
+# In samples of the downsampled signal.
+AR_PAD_DOWNSAMPLED = int(AR_WINDOW_SEC * AR_TARGET_FS)
 
-# Debounce delay before starting a new AR computation after a view change.
 DEBOUNCE_MS = 300
-
-# How much mismatch (in seconds) between the requested range and the current
-# view is tolerated before a result is considered stale.
 STALE_TOLERANCE_SEC = 0.5
 
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
-# Upper / lower AR pole-magnitude thresholds used for spindle detection,
-# per brain region. Drawn as horizontal reference lines on the R trace and
-# re-applied automatically when the Region combo changes.
 REGION_THRESHOLDS = {
     "HPC": {"upper": 0.85, "lower": 0.40},
     "PL":  {"upper": 0.85, "lower": 0.40},
     "RSC": {"upper": 0.90, "lower": 0.40},
 }
-
-# Fallback thresholds for regions not listed above.
 DEFAULT_THRESHOLDS = {"upper": 0.85, "lower": 0.40}
 
-# Populated by parse_args() before main() runs.
 VERBOSE = False
 
 
@@ -123,7 +105,6 @@ def vprint(*args, **kwargs):
 
 
 def _sanitize(x):
-    """Return a float64 numpy array free of NaN/Inf."""
     arr = np.asarray(x, dtype=np.float64)
     if not np.all(np.isfinite(arr)):
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -131,19 +112,15 @@ def _sanitize(x):
 
 
 # --------------------------------------------------------------------------- #
-# AR Window Worker
+# AR Window Worker — mirrors find_spindles_lfp internals exactly
 # --------------------------------------------------------------------------- #
 class ARWindowWorker(QtCore.QThread):
     """
-    Computes the continuous R-value trace for a given time slice.
+    Computes the continuous R trace for the given time slice, using the same
+    pipeline as find_spindles_lfp() so the trace reproduces the detector's
+    per-window R values.
 
-    Emits:
-      finished_ok(requested_start_s, requested_end_s, t_vals, r_vals)
-      failed(message)
-
-    The requested range is echoed back so the UI can detect stale results.
-    Lists are used for the payload to guarantee thread-safe delivery across
-    the PyQt5 event loop.
+    Emits: finished_ok(requested_start_s, requested_end_s, t_vals, r_vals)
     """
 
     finished_ok = QtCore.pyqtSignal(float, float, list, list)
@@ -160,32 +137,44 @@ class ARWindowWorker(QtCore.QThread):
         self._is_cancelled = True
 
     def run(self):
-        vprint("\n[AR] worker entered "
-               f"range=[{self.start_s:.3f}, {self.end_s:.3f}] "
-               f"raw_len={len(self.raw_signal)}")
+        vprint(
+            f"\n[AR] range=[{self.start_s:.3f}, {self.end_s:.3f}] "
+            f"raw_len={len(self.raw_signal)}"
+        )
         try:
-            s_idx = int(self.start_s * FS)
+            # Pad on both sides so windows whose CENTER falls within the
+            # visible range have all their samples available.
+            half_win_sec = AR_WINDOW_SEC / 2.0
+            s_idx = max(0, int((self.start_s - half_win_sec) * FS))
             e_idx = min(
-                len(self.raw_signal),
-                int((self.end_s + AR_PAD_SEC) * FS),
+                len(self.raw_signal), int((self.end_s + half_win_sec) * FS)
             )
 
             if s_idx >= e_idx:
                 self._emit_empty()
                 return
 
-            signal_segment = _sanitize(self.raw_signal[s_idx:e_idx])
-            if len(signal_segment) == 0:
+            segment_raw = _sanitize(self.raw_signal[s_idx:e_idx])
+            if len(segment_raw) == 0:
                 self._emit_empty()
                 return
 
-            filtered = ar_bandpass_filter(
-                signal_segment, lowcut=0.1, highcut=100, fs=FS
-            )
+            # ---- Stage 1: same pre-filter as find_spindles_lfp -------- #
+            try:
+                filtered = ar_bandpass_filter(
+                    segment_raw,
+                    lowcut=AR_PRE_LOWCUT,
+                    highcut=AR_PRE_HIGHCUT,
+                    fs=FS,
+                )
+            except TypeError:
+                filtered = ar_bandpass_filter(
+                    segment_raw, AR_PRE_LOWCUT, AR_PRE_HIGHCUT, FS
+                )
             filtered = _sanitize(filtered)
 
-            signal_128 = ar_downsampling(filtered, FS, AR_TARGET_FS)
-            signal_128 = _sanitize(signal_128)
+            # ---- Stage 2: same downsample ----------------------------- #
+            signal_128 = _sanitize(ar_downsampling(filtered, FS, AR_TARGET_FS))
 
             window_samples = int(AR_WINDOW_SEC * AR_TARGET_FS)
             if len(signal_128) < window_samples:
@@ -193,15 +182,17 @@ class ARWindowWorker(QtCore.QThread):
                 return
 
             total_windows = len(signal_128) - window_samples + 1
-            r_values = np.full(total_windows, np.nan, dtype=np.float64)
+            starts = np.arange(0, total_windows, AR_STRIDE_SAMPLES)
+            n_windows = len(starts)
+
+            r_values = np.zeros(n_windows, dtype=np.float64)  # detector uses 0.0 for no-in-band
             n_in_band = 0
             n_failed = 0
             first_error = None
 
-            for i in range(total_windows):
+            for k, i in enumerate(starts):
                 if self._is_cancelled:
                     return
-
                 window = signal_128[i : i + window_samples]
                 if not np.all(np.isfinite(window)) or np.all(window == 0.0):
                     n_failed += 1
@@ -209,28 +200,22 @@ class ARWindowWorker(QtCore.QThread):
 
                 try:
                     a, _ = sm.regression.linear_model.burg(
-                        window, order=AR_ORDER, demean=True
+                        window, order=AR_ORDER, demean=False  # matches detector
                     )
                     poles = np.roots(np.r_[1, -a])
                     poles = poles[np.imag(poles) > 0]
 
-                    if len(poles) == 0:
-                        n_failed += 1
-                        continue
-
-                    freqs = np.angle(poles) * AR_TARGET_FS / (2 * np.pi)
-                    r_vals = np.abs(poles)
-
-                    # Continuous trace: R of the pole closest to band center.
-                    idx = int(np.argmin(np.abs(freqs - AR_BAND_CENTER)))
-                    r_values[i] = float(r_vals[idx])
-
-                    # Diagnostic: did *any* pole fall inside the band?
-                    if np.any(
-                        (freqs >= AR_SPINDLE_BAND[0])
-                        & (freqs <= AR_SPINDLE_BAND[1])
-                    ):
-                        n_in_band += 1
+                    if len(poles) > 0:
+                        freqs = np.angle(poles) * AR_TARGET_FS / (2 * np.pi)
+                        r_vals = np.abs(poles)
+                        mask = (
+                            (freqs >= AR_SPINDLE_BAND[0])
+                            & (freqs <= AR_SPINDLE_BAND[1])
+                        )
+                        if np.any(mask):
+                            r_values[k] = float(np.max(r_vals[mask]))
+                            n_in_band += 1
+                        # else: leave 0.0, same as _fit_window
                 except Exception as exc:
                     n_failed += 1
                     if first_error is None:
@@ -239,25 +224,28 @@ class ARWindowWorker(QtCore.QThread):
             if self._is_cancelled:
                 return
 
-            n_finite = int(np.isfinite(r_values).sum())
-            if n_finite == 0:
-                msg = (
-                    f"All {total_windows} AR windows failed. "
-                    f"First error: {first_error or 'no poles found'}. "
-                    f"Likely cause: NaN/Inf in source signal or statsmodels "
-                    f"burg signature mismatch."
+            # ---- Stage 3: time axis = window CENTER in absolute time --- #
+            # We computed windows on signal_128 starting at index 0, which
+            # corresponds to raw sample s_idx. The window's start sample in
+            # the raw timeline is s_idx + i * (FS/AR_TARGET_FS), and its
+            # center adds half the window length.
+            downsample_ratio = FS / AR_TARGET_FS
+            half_win_raw = window_samples * downsample_ratio / 2.0
+            t_vals = (s_idx + starts * downsample_ratio + half_win_raw) / FS
+
+            vprint(
+                f"[AR] emit n={n_windows} in_band={n_in_band} "
+                f"fail={n_failed} "
+                f"t=[{t_vals[0]:.3f},{t_vals[-1]:.3f}]"
+            )
+
+            if n_in_band == 0 and n_failed == n_windows:
+                self.failed.emit(
+                    f"All {n_windows} AR windows failed. "
+                    f"First error: {first_error or 'no poles'}"
                 )
-                vprint(f"[AR] {msg}")
-                self.failed.emit(msg)
                 return
 
-            t_vals = self.start_s + np.arange(len(r_values)) / AR_TARGET_FS
-            vprint(
-                f"[AR] emit n={len(r_values)} "
-                f"finite={n_finite}/{total_windows} "
-                f"in_band={n_in_band} "
-                f"range=[{t_vals[0]:.3f}, {t_vals[-1]:.3f}]"
-            )
             self.finished_ok.emit(
                 self.start_s,
                 self.end_s,
@@ -305,12 +293,8 @@ class SignalLoader(QtCore.QThread):
 
             filtered = butter_bandpass_filter(raw, BP_LOW, BP_HIGH, FS)
             filtered = np.nan_to_num(
-                filtered.astype(np.float32),
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
+                filtered.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0
             )
-
             vprint(f"[Load] raw len={len(raw)} std={raw.std():.3f}")
             self.finished_ok.emit(raw, filtered)
         except Exception as e:
@@ -373,7 +357,6 @@ def resolve_interval_columns(df, default_fs=1000.0):
         return df, True
 
     cols_lower = {str(c).lower().strip(): c for c in df.columns}
-
     start_candidates = [
         "start_s", "start_time", "start_sec", "start_secs", "start",
         "start_time_s", "spindle_start", "onset_s", "onset_time",
@@ -457,9 +440,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self._loader_thread = None
         self._ar_signal_thread = None
         self._pending_task = None
-
-        # Suppresses syncing while we ourselves are moving the other tracker,
-        # to prevent runaway cross-recursion between jump handlers.
         self._syncing_navigation = False
 
         self.view_update_timer = QtCore.QTimer(self)
@@ -482,7 +462,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.setCentralWidget(main_widget)
         root_layout = QtWidgets.QVBoxLayout(main_widget)
 
-        # --- Filters ---------------------------------------------------- #
         filter_box = QtWidgets.QGroupBox("Dataset Filtering")
         filter_layout = QtWidgets.QHBoxLayout()
 
@@ -505,7 +484,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         filter_box.setLayout(filter_layout)
         root_layout.addWidget(filter_box)
 
-        # --- Navigation ------------------------------------------------- #
         nav_box = QtWidgets.QGroupBox("Detection Navigation")
         nav_layout = QtWidgets.QHBoxLayout()
 
@@ -542,7 +520,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         for text, color in [
             ("■ AR Spindle Event", "#ff3333"),
             ("■ Wavelet Spindle Event", "#00e5ff"),
-            ("— AR Pole R Value", "#ffab40"),
+            ("— AR R (in-band max)", "#ffab40"),
             ("--- T_upper", "#ff5252"),
             ("--- T_lower", "#52a0ff"),
         ]:
@@ -554,7 +532,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         nav_box.setLayout(nav_layout)
         root_layout.addWidget(nav_box)
 
-        # --- Plots ------------------------------------------------------ #
         pg.setConfigOptions(antialias=True)
         self.graphics_layout = pg.GraphicsLayoutWidget()
         root_layout.addWidget(self.graphics_layout, stretch=1)
@@ -575,50 +552,38 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_r.showGrid(x=True, y=True, alpha=0.3)
         self.p_r.setLabel("left", "R")
         self.p_r.setLabel("bottom", "Time", units="s")
+
+        # The detector returns 0.0 when no in-band pole exists; use a marker
+        # (not a line) so the zeros don't dominate the plot.
         self.curve_r_continuous = self.p_r.plot(
             pen=pg.mkPen(color="#ffab40", width=2),
             connect="finite",
         )
 
-        # --- Threshold reference lines --------------------------------- #
+        # Threshold reference lines
         self.line_upper = pg.InfiniteLine(
             angle=0,
             movable=False,
-            pen=pg.mkPen(
-                color=(255, 82, 82, 200),
-                width=1.5,
-                style=QtCore.Qt.DashLine,
-            ),
+            pen=pg.mkPen(color=(255, 82, 82, 200), width=1.5,
+                         style=QtCore.Qt.DashLine),
             label="T_upper",
-            labelOpts={
-                "position": 0.05,
-                "color": (255, 82, 82),
-                "fill": (0, 0, 0, 120),
-                "movable": False,
-            },
+            labelOpts={"position": 0.05, "color": (255, 82, 82),
+                       "fill": (0, 0, 0, 120), "movable": False},
         )
         self.line_lower = pg.InfiniteLine(
             angle=0,
             movable=False,
-            pen=pg.mkPen(
-                color=(82, 160, 255, 200),
-                width=1.5,
-                style=QtCore.Qt.DashLine,
-            ),
+            pen=pg.mkPen(color=(82, 160, 255, 200), width=1.5,
+                         style=QtCore.Qt.DashLine),
             label="T_lower",
-            labelOpts={
-                "position": 0.05,
-                "color": (82, 160, 255),
-                "fill": (0, 0, 0, 120),
-                "movable": False,
-            },
+            labelOpts={"position": 0.05, "color": (82, 160, 255),
+                       "fill": (0, 0, 0, 120), "movable": False},
         )
         self.line_upper.setZValue(15)
         self.line_lower.setZValue(15)
         self.p_r.addItem(self.line_upper)
         self.p_r.addItem(self.line_lower)
 
-        # Loading indicator for the R plot.
         self.loading_text = pg.TextItem("", color=(255, 171, 64), anchor=(0.5, 0.5))
         font = QtGui.QFont()
         font.setBold(True)
@@ -629,13 +594,11 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.p_r.setYRange(0.0, 1.05, padding=0)
 
-        # Link X axes so navigation on p_raw moves all three.
         self.p_filt.setXLink(self.p_raw)
         self.p_r.setXLink(self.p_raw)
         self._span_plots = (self.p_raw, self.p_filt, self.p_r)
         self.region_items = []
 
-        # --- Details panel --------------------------------------------- #
         self.details_panel = QtWidgets.QTextEdit()
         self.details_panel.setReadOnly(True)
         self.details_panel.setMaximumHeight(90)
@@ -647,7 +610,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         self.status_bar = self.statusBar()
 
-        # --- Shortcuts -------------------------------------------------- #
         QtWidgets.QShortcut(
             QtGui.QKeySequence(QtCore.Qt.Key_Left), self, self.on_prev_ar_event
         )
@@ -664,31 +626,20 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.p_raw.sigXRangeChanged.connect(self._on_xrange_changed)
 
     # --------------------------------------------------------------------- #
-    # Threshold lines
+    # Thresholds
     # --------------------------------------------------------------------- #
     def _current_thresholds(self):
-        """Return (upper, lower) thresholds for the currently selected region."""
         region = self.combo_region.currentData()
         thr = REGION_THRESHOLDS.get(region, DEFAULT_THRESHOLDS)
         return float(thr["upper"]), float(thr["lower"])
 
     def _refresh_threshold_lines(self):
-        """Set the upper/lower threshold lines based on the current region."""
         upper, lower = self._current_thresholds()
-
         self.line_upper.setValue(upper)
         self.line_lower.setValue(lower)
-
-        # Rescale Y so the upper threshold is always visible, but preserve
-        # any already-drawn R data. If the trace is present, take the max of
-        # the two so nothing gets cropped.
         ymax = max(1.05, upper * 1.05)
         self.p_r.setYRange(0.0, ymax, padding=0)
-
-        vprint(
-            f"[UI] thresholds set: T_upper={upper:.3f} "
-            f"T_lower={lower:.3f} (region={self.combo_region.currentData()})"
-        )
+        vprint(f"[UI] T_upper={upper:.3f} T_lower={lower:.3f}")
 
     # --------------------------------------------------------------------- #
     # Data loading
@@ -697,16 +648,13 @@ class SpindleViewer(QtWidgets.QMainWindow):
         if not MODULES_AVAILABLE:
             self.details_panel.setText(
                 f"Error: Could not import ephys_preprocessing modules.\n"
-                f"Details: {_IMPORT_ERROR}\n"
-                f"Ensure AR_MODULES_ROOT is set correctly."
+                f"Details: {_IMPORT_ERROR}"
             )
             return
 
         if not os.path.exists(self.manifest_path):
             self.details_panel.setText(
-                f"Manifest not found: {self.manifest_path}\n"
-                f"Pass --manifest, or set SPINDLE_MANIFEST, to point at your "
-                f"tasks CSV."
+                f"Manifest not found: {self.manifest_path}"
             )
             return
 
@@ -721,8 +669,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         }
         if missing:
             self.details_panel.setText(
-                f"Manifest is missing required column(s): {sorted(missing)}. "
-                f"Expected at least: {sorted(REQUIRED_MANIFEST_COLS)}"
+                f"Manifest is missing required column(s): {sorted(missing)}."
             )
             self.manifest_df = None
             return
@@ -731,8 +678,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         bad = int(rat_numeric.isna().sum())
         if bad:
             self.status_bar.showMessage(
-                f"Warning: dropped {bad} manifest row(s) with a "
-                f"non-numeric 'rat' value.",
+                f"Warning: dropped {bad} manifest row(s) with a non-numeric 'rat'.",
                 8000,
             )
         self.manifest_df = self.manifest_df.loc[rat_numeric.notna()].copy()
@@ -757,7 +703,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.wavelet_df = self._load_detection_csv(
             self.wavelet_csv_path, kind="Wavelet", is_wavelet=True
         )
-
         self.populate_rat_selector()
 
     def _load_detection_csv(self, path, kind, is_wavelet=False):
@@ -823,14 +768,12 @@ class SpindleViewer(QtWidgets.QMainWindow):
         df, resolved = resolve_interval_columns(df, FS)
         if not df.empty and not resolved:
             self.status_bar.showMessage(
-                f"Warning: couldn't find start/end time columns in {kind} CSV; "
-                f"events from it will not be positioned correctly.",
-                10000,
+                f"Warning: couldn't find start/end columns in {kind} CSV.", 10000
             )
         return df
 
     # --------------------------------------------------------------------- #
-    # Filter combo handlers
+    # Combos
     # --------------------------------------------------------------------- #
     def populate_rat_selector(self):
         rats = sorted(self.manifest_df["Rat"].unique().tolist())
@@ -880,8 +823,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.combo_files.addItem(lbl, userData=orig_idx)
         self.combo_files.blockSignals(False)
 
-        # Reposition the threshold lines for this region *before* loading the
-        # file, so they're correct when the first trace is drawn.
         self._refresh_threshold_lines()
 
         if self.combo_files.count() > 0:
@@ -925,11 +866,9 @@ class SpindleViewer(QtWidgets.QMainWindow):
     def on_file_selected(self, index):
         if index < 0 or self.manifest_df is None or self.combo_files.count() == 0:
             return
-
         manifest_idx = self.combo_files.itemData(index)
         if manifest_idx is None or manifest_idx not in self.manifest_df.index:
             return
-
         task = self.manifest_df.loc[manifest_idx]
         data_path = task["data_path"]
 
@@ -978,10 +917,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.curve_filt.setData(self.time_vector, self.filtered_signal)
         self.curve_r_continuous.clear()
 
-        # Make sure threshold lines reflect the current region and the Y
-        # axis accommodates the upper threshold.
         self._refresh_threshold_lines()
-
         self.draw_spans()
 
         self.current_ar_idx = 0 if len(self.current_ar_events) > 0 else -1
@@ -995,26 +931,23 @@ class SpindleViewer(QtWidgets.QMainWindow):
             f"{len(self.current_wavelet_events)}"
         )
 
-        # Time-sync: if AR has detections, jump there and let the sync logic
-        # move the WAV tracker to the nearest-in-time wavelet event. If AR
-        # has none but WAV does, do the reverse.
         if self.current_ar_idx >= 0:
             self.jump_to_ar_event(sync=True)
         elif self.current_wav_idx >= 0:
             self.jump_to_wav_event(sync=True)
         else:
-            initial_end = min(VIEW_WINDOW_SEC, self.data_duration)
-            self.p_raw.setXRange(0, initial_end, padding=0)
+            self.p_raw.setXRange(
+                0, min(VIEW_WINDOW_SEC, self.data_duration), padding=0
+            )
             self.details_panel.setText(
                 f"File: {task['File']} | Length: {self.data_duration:.1f}s | "
-                f"No spindle detections found for this recording."
+                f"No spindle detections found."
             )
             self.view_update_timer.start(DEBOUNCE_MS)
 
     def _select_events_for_task(self, task):
         file_name = task["File"]
 
-        # AR events: prefer exact file match, fall back to (Rat, Region, Date).
         if not self.ar_df.empty:
             if "File" in self.ar_df.columns and (
                 self.ar_df["File"] == file_name
@@ -1034,8 +967,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
         else:
             self.current_ar_events = pd.DataFrame()
 
-        # Wavelet events: filter by (Rat, Region, Date), then narrow by
-        # channel and trial when available.
         if not self.wavelet_df.empty:
             w = self.wavelet_df
             wav_sub = w[
@@ -1043,17 +974,14 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 & (w["Region"] == task["Region"])
                 & (w["Date"] == task["Date"])
             ]
-
             if not wav_sub.empty and task["channel"]:
                 chan_match = wav_sub[wav_sub["channel"] == task["channel"]]
                 if not chan_match.empty:
                     wav_sub = chan_match
-
             if not wav_sub.empty and task["trial"]:
                 trial_match = wav_sub[wav_sub["trial"] == task["trial"]]
                 if not trial_match.empty:
                     wav_sub = trial_match
-
             self.current_wavelet_events = (
                 wav_sub.sort_values("Start_s").reset_index(drop=True)
                 if not wav_sub.empty
@@ -1063,7 +991,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.current_wavelet_events = pd.DataFrame()
 
     # --------------------------------------------------------------------- #
-    # View-change debounce
+    # View change
     # --------------------------------------------------------------------- #
     def _on_xrange_changed(self, _, range_tuple):
         if self.raw_signal is not None:
@@ -1072,13 +1000,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
     def _update_spinner(self):
         self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_frames)
         frame = self.spinner_frames[self.spinner_idx]
-        self.loading_text.setText(f"Calculating R-values {frame}")
-
+        self.loading_text.setText(f"Calculating R {frame}")
         view_range = self.p_r.viewRange()
         cx = 0.5 * (view_range[0][0] + view_range[0][1])
         cy = 0.5 * (view_range[1][0] + view_range[1][1])
-        if view_range[1][0] == 0.0 and view_range[1][1] == 1.0:
-            cy = 0.5
         self.loading_text.setPos(cx, cy)
 
     # --------------------------------------------------------------------- #
@@ -1087,14 +1012,12 @@ class SpindleViewer(QtWidgets.QMainWindow):
     def _start_window_computation(self):
         if not MODULES_AVAILABLE or self.raw_signal is None:
             return
-
         if self._ar_signal_thread is not None and self._ar_signal_thread.isRunning():
             self._ar_signal_thread.cancel()
             self._ar_signal_thread.wait()
 
         view = self.p_raw.viewRange()[0]
         start_s, end_s = float(view[0]), float(view[1])
-        vprint(f"[UI] start AR for range=[{start_s:.3f}, {end_s:.3f}]")
 
         self.loading_text.show()
         self.spinner_timer.start(100)
@@ -1116,15 +1039,10 @@ class SpindleViewer(QtWidgets.QMainWindow):
         current_view = self.p_raw.viewRange()[0]
         cur_lo, cur_hi = float(current_view[0]), float(current_view[1])
 
-        # Stale-result rejection: the view has moved while we were computing.
         if (
             abs(cur_lo - requested_start) > STALE_TOLERANCE_SEC
             or abs(cur_hi - requested_end) > STALE_TOLERANCE_SEC
         ):
-            vprint(
-                f"[UI] stale result for [{requested_start:.3f}, {requested_end:.3f}] "
-                f"(current view [{cur_lo:.3f}, {cur_hi:.3f}]) -> discarded"
-            )
             return
 
         if len(t_vals) == 0 or len(t_vals) != len(r_vals):
@@ -1133,27 +1051,21 @@ class SpindleViewer(QtWidgets.QMainWindow):
         t_arr = np.asarray(t_vals, dtype=np.float64)
         r_arr = np.asarray(r_vals, dtype=np.float64)
 
-        # Safety net: snap view to data if they don't overlap.
+        # Detector returns 0.0 when no in-band pole exists. Convert those to
+        # NaN so connect="finite" draws gaps instead of dropping to zero.
+        r_plot = np.where(r_arr > 0.0, r_arr, np.nan)
+
         data_lo, data_hi = float(t_arr[0]), float(t_arr[-1])
         if cur_hi < data_lo or cur_lo > data_hi:
-            vprint(
-                f"[UI] view/data mismatch; snapping X view to "
-                f"[{data_lo:.3f}, {data_hi:.3f}]"
-            )
             self.p_raw.setXRange(data_lo, data_hi, padding=0)
 
-        self.curve_r_continuous.setData(t_arr, r_arr)
+        self.curve_r_continuous.setData(t_arr, r_plot)
 
-        # Y-range: never crop below the region's upper threshold line.
         upper, _ = self._current_thresholds()
-        finite = r_arr[np.isfinite(r_arr)]
+        finite = r_plot[np.isfinite(r_plot)]
         data_max = float(np.nanmax(finite)) if finite.size else 0.0
         ymax = max(1.05, upper * 1.05, data_max * 1.05)
         self.p_r.setYRange(0.0, ymax, padding=0)
-        vprint(
-            f"[UI] drew AR trace n={len(r_arr)} finite={finite.size} "
-            f"ymax={ymax:.3f} upper_thr={upper:.3f}"
-        )
 
     def _on_window_computation_failed(self, msg):
         self.spinner_timer.stop()
@@ -1161,7 +1073,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self.status_bar.showMessage(f"AR computation failed: {msg}", 12000)
 
     # --------------------------------------------------------------------- #
-    # Event spans
+    # Spans
     # --------------------------------------------------------------------- #
     def draw_spans(self):
         self._remove_span_items()
@@ -1189,36 +1101,25 @@ class SpindleViewer(QtWidgets.QMainWindow):
                 self.current_wavelet_events,
                 brush_rgba=(0, 229, 255, 90),
                 pen_rgba=(0, 229, 255, 230),
-                width=1.8,
-                z=5,
+                width=1.8, z=5,
             )
-
         if not self.current_ar_events.empty:
             add_spans(
                 self.current_ar_events,
                 brush_rgba=(255, 50, 50, 80),
                 pen_rgba=(255, 50, 50, 230),
-                width=1.5,
-                z=10,
+                width=1.5, z=10,
             )
 
     # --------------------------------------------------------------------- #
-    # Nearest-event helpers (for time-sync)
+    # Nearest-event helpers
     # --------------------------------------------------------------------- #
     @staticmethod
     def _nearest_index(df, center_s):
-        """Index of the row in df whose [Start_s, End_s] is nearest to center_s.
-
-        Distance is measured to the interval (0 if center_s is inside the
-        interval). Returns -1 if df is empty.
-        """
         if df.empty:
             return -1
-
         starts = df["Start_s"].to_numpy(dtype=np.float64)
         ends = df["End_s"].to_numpy(dtype=np.float64)
-        # Distance from center to the interval [start, end]:
-        # 0 if inside, else distance to nearest endpoint.
         dist = np.where(
             center_s < starts, starts - center_s,
             np.where(center_s > ends, center_s - ends, 0.0),
@@ -1226,14 +1127,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
         return int(np.argmin(dist))
 
     def _sync_other_tracker_to(self, center_s, source):
-        """Move the other detector's current index to its nearest event.
-
-        source is 'ar' or 'wav'. Guards against recursion via
-        self._syncing_navigation.
-        """
         if self._syncing_navigation:
             return
-
         self._syncing_navigation = True
         try:
             if source == "ar":
@@ -1297,14 +1192,12 @@ class SpindleViewer(QtWidgets.QMainWindow):
         half = VIEW_WINDOW_SEC / 2.0
         view_start = center - half
         view_end = center + half
-
         if view_start < 0.0:
             view_start = 0.0
             view_end = min(VIEW_WINDOW_SEC, self.data_duration)
         if view_end > self.data_duration:
             view_end = self.data_duration
             view_start = max(0.0, view_end - VIEW_WINDOW_SEC)
-
         return view_start, view_end
 
     def jump_to_ar_event(self, sync=False):
@@ -1312,7 +1205,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.current_ar_events
         ):
             return
-
         event = self.current_ar_events.iloc[self.current_ar_idx]
         start_s = safe_float(event["Start_s"], 0.0)
         end_s = safe_float(event["End_s"], 0.0)
@@ -1336,7 +1228,6 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self.current_wavelet_events
         ):
             return
-
         event = self.current_wavelet_events.iloc[self.current_wav_idx]
         start_s = safe_float(event["Start_s"], 0.0)
         end_s = safe_float(event["End_s"], 0.0)
@@ -1356,27 +1247,25 @@ class SpindleViewer(QtWidgets.QMainWindow):
         self._update_details_panel_wav(start_s, end_s)
 
     # --------------------------------------------------------------------- #
-    # Details panel content
+    # Details panel
     # --------------------------------------------------------------------- #
     def _update_details_panel_ar(self, start_s, end_s):
-        """Compose the details panel from the current AR + nearest WAV."""
         ar_event = self.current_ar_events.iloc[self.current_ar_idx]
         r_val = ar_event.get("Max_R", np.nan)
         freq_val = ar_event.get("Peak_Freq_Hz", np.nan)
+        center_s = 0.5 * (start_s + end_s)
 
-        # Find wavelet events overlapping the focused AR window.
         overlapping = pd.DataFrame()
         if not self.current_wavelet_events.empty:
             w = self.current_wavelet_events
             overlapping = w[(w["Start_s"] <= end_s) & (w["End_s"] >= start_s)]
 
-        # Also identify the nearest wavelet event by center distance.
         nearest_txt = "N/A"
         if not self.current_wavelet_events.empty:
-            center_s = 0.5 * (start_s + end_s)
             w_idx = self._nearest_index(self.current_wavelet_events, center_s)
             w_row = self.current_wavelet_events.iloc[w_idx]
-            ws, we = safe_float(w_row["Start_s"], 0.0), safe_float(w_row["End_s"], 0.0)
+            ws = safe_float(w_row["Start_s"], 0.0)
+            we = safe_float(w_row["End_s"], 0.0)
             nearest_txt = (
                 f"#{w_idx + 1} [{ws:.3f}s - {we:.3f}s] "
                 f"(Δcenter={abs(0.5*(ws+we) - center_s):.3f}s)"
@@ -1384,36 +1273,35 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
         upper, lower = self._current_thresholds()
         region = self.combo_region.currentData()
-
         align_desc = (
-            f"ALIGNED: {len(overlapping)} wavelet event(s) overlap this AR window"
+            f"ALIGNED: {len(overlapping)} wavelet event(s) overlap"
             if len(overlapping) > 0
             else "ISOLATED: no overlapping wavelet event"
         )
 
-        lines = [
+        self.details_panel.setText("\n".join([
             f"[AR #{self.current_ar_idx + 1}/{len(self.current_ar_events)}] "
             f"region={region}  T_upper={upper:.2f} T_lower={lower:.2f}",
             f"  AR interval: [{start_s:.3f}s - {end_s:.3f}s] "
             f"(Duration: {end_s - start_s:.3f}s)  "
             f"CSV Max R={fmt(r_val)}  Peak Freq={fmt(freq_val, '.2f')} Hz",
-            f"  Nearest WAV event: {nearest_txt}",
+            f"  Nearest WAV: {nearest_txt}",
             f"  Alignment: {align_desc}",
-        ]
-        self.details_panel.setText("\n".join(lines))
+        ]))
         self.lbl_ar_tracker.setText(
             f"AR: {self.current_ar_idx + 1} / {len(self.current_ar_events)}"
         )
 
     def _update_details_panel_wav(self, start_s, end_s):
-        """Compose the details panel from the current WAV + nearest AR."""
-        ar_event = None
+        center_s = 0.5 * (start_s + end_s)
+
         nearest_txt = "N/A"
+        ar_event = None
         if not self.current_ar_events.empty:
-            center_s = 0.5 * (start_s + end_s)
             a_idx = self._nearest_index(self.current_ar_events, center_s)
             a_row = self.current_ar_events.iloc[a_idx]
-            as_, ae = safe_float(a_row["Start_s"], 0.0), safe_float(a_row["End_s"], 0.0)
+            as_ = safe_float(a_row["Start_s"], 0.0)
+            ae = safe_float(a_row["End_s"], 0.0)
             nearest_txt = (
                 f"#{a_idx + 1} [{as_:.3f}s - {ae:.3f}s] "
                 f"(Δcenter={abs(0.5*(as_+ae) - center_s):.3f}s)"
@@ -1426,7 +1314,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
             overlapping = a[(a["Start_s"] <= end_s) & (a["End_s"] >= start_s)]
 
         align_desc = (
-            f"ALIGNED: {len(overlapping)} AR event(s) overlap this WAV window"
+            f"ALIGNED: {len(overlapping)} AR event(s) overlap"
             if len(overlapping) > 0
             else "ISOLATED: no overlapping AR event"
         )
@@ -1434,26 +1322,20 @@ class SpindleViewer(QtWidgets.QMainWindow):
         upper, lower = self._current_thresholds()
         region = self.combo_region.currentData()
 
-        # If the nearest AR event has CSV metadata, surface it.
-        ar_meta = ""
-        if ar_event is not None:
-            ar_meta = (
-                f"  Nearest AR: Max R={fmt(ar_event.get('Max_R', np.nan))}  "
-                f"Peak Freq={fmt(ar_event.get('Peak_Freq_Hz', np.nan), '.2f')} Hz"
-            )
-
         lines = [
             f"[WAV #{self.current_wav_idx + 1}/"
             f"{len(self.current_wavelet_events)}] "
             f"region={region}  T_upper={upper:.2f} T_lower={lower:.2f}",
             f"  WAV interval: [{start_s:.3f}s - {end_s:.3f}s] "
             f"(Duration: {end_s - start_s:.3f}s)",
-            f"  Nearest AR event: {nearest_txt}",
+            f"  Nearest AR: {nearest_txt}",
             f"  Alignment: {align_desc}",
         ]
-        if ar_meta:
-            lines.append(ar_meta)
-
+        if ar_event is not None:
+            lines.append(
+                f"  Nearest AR: Max R={fmt(ar_event.get('Max_R', np.nan))}  "
+                f"Peak Freq={fmt(ar_event.get('Peak_Freq_Hz', np.nan), '.2f')} Hz"
+            )
         self.details_panel.setText("\n".join(lines))
         self.lbl_wav_tracker.setText(
             f"WAV: {self.current_wav_idx + 1} / "
@@ -1468,42 +1350,29 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Spindle Alignment Inspector (AR vs Wavelet)"
     )
-    parser.add_argument(
-        "--manifest", default=DEFAULT_MANIFEST,
-        help="Path to tasks_manifest.csv",
-    )
-    parser.add_argument(
-        "--ar-csv", default=DEFAULT_AR_CSV,
-        help="Path to AR-detected spindles CSV",
-    )
-    parser.add_argument(
-        "--wavelet-csv", default=DEFAULT_WAVELET_CSV,
-        help="Path to wavelet-detected spindles CSV",
-    )
-    parser.add_argument(
-        "--debug", action="store_true",
-        help="Print verbose diagnostic output to the terminal.",
-    )
+    parser.add_argument("--manifest", default=DEFAULT_MANIFEST)
+    parser.add_argument("--ar-csv", default=DEFAULT_AR_CSV)
+    parser.add_argument("--wavelet-csv", default=DEFAULT_WAVELET_CSV)
+    parser.add_argument("--debug", action="store_true")
     args, _ = parser.parse_known_args()
     return args
 
 
 def main():
     global VERBOSE
-
     args = parse_args()
     VERBOSE = args.debug
 
     if VERBOSE:
         print("=" * 70)
         print("Spindle Alignment Inspector — DEBUG")
-        print("=" * 70)
         print(f"manifest    = {args.manifest}")
         print(f"ar_csv      = {args.ar_csv}")
         print(f"wavelet_csv = {args.wavelet_csv}")
         print(f"MODULES_AVAILABLE = {MODULES_AVAILABLE}")
-        if not MODULES_AVAILABLE:
-            print(f"IMPORT_ERROR = {_IMPORT_ERROR}")
+        print(f"AR_STRIDE_SAMPLES = {AR_STRIDE_SAMPLES}")
+        print(f"AR_ORDER = {AR_ORDER}  AR_WINDOW_SEC = {AR_WINDOW_SEC}")
+        print(f"AR_PRE_FILTER = ({AR_PRE_LOWCUT}, {AR_PRE_HIGHCUT})")
         print("=" * 70)
 
     app = QtWidgets.QApplication(sys.argv)
