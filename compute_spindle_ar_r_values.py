@@ -12,6 +12,16 @@ For each spindle event:
      to map R evolution.
   4. Generates region-level distributions, per-rat averages, and explicit
      hysteresis recommendations (upper/lower threshold pairs).
+
+Data-quality note (fixed):
+  Events where NO sliding window resolved an in-band AR pole (in_band_ratio == 0)
+  are now marked NaN for r_max/r_min/r_mean instead of silently defaulting to 0.0.
+  A 0.0 R-value is indistinguishable from "no pole found" vs. "a real, very weak
+  pole" unless in_band_ratio is checked, and folding failed fits in as if they
+  were valid low-R spindles collapses percentile-based thresholds toward zero.
+  Summary tables now (a) drop events below a minimum in_band_ratio, and
+  (b) report per-region in_band_ratio / fit-failure diagnostics so failures are
+  visible rather than silently baked into the calibration.
 """
 
 import logging
@@ -46,11 +56,17 @@ MANIFEST_PATH = "tasks_manifest.csv"
 FS = 1000               # Raw LFP rate
 TARGET_FS = 128         # Downsampled rate for AR fitting
 AR_ORDER = 8
-SPINDLE_BAND = (9, 20)
+SPINDLE_BAND = (10, 15)
 AR_WINDOW_SEC = 1.0
 
 # Window stride in samples at TARGET_FS (2 samples = ~15.6 ms resolution)
-STRIDE_SAMPLES = 2
+STRIDE_SAMPLES = 4
+
+# Minimum fraction of sliding windows within an event that must resolve an
+# in-band AR pole (r > 0) for that event's r_max/r_min/etc. to be trusted.
+# Events below this are excluded from calibration statistics as fit failures,
+# not treated as "genuinely low R" spindles.
+MIN_IN_BAND_RATIO = 0.5
 
 START_COL = "spindle_start_time_s"
 END_COL = "spindle_end_time_s"
@@ -177,6 +193,11 @@ def analyze_spindle_r_dynamics(
     """
     Evaluates sliding 1s AR windows with centers spanning [start_s, end_s].
     Returns peak, minimum, boundary values, and normalized temporal evolution.
+
+    IMPORTANT: r_max/r_min/r_mean/r_start/r_end are only meaningful when at
+    least some windows resolved an in-band pole (r > 0). If in_band_ratio is 0,
+    every returned r_* value is NaN rather than 0.0, so downstream code can
+    distinguish "fit failed everywhere" from "a genuinely weak/absent pole".
     """
     win_samples = int(window_sec * target_fs)
     half_win = win_samples // 2
@@ -205,15 +226,30 @@ def analyze_spindle_r_dynamics(
             "r_max": np.nan, "r_min": np.nan, "r_mean": np.nan,
             "r_start": np.nan, "r_end": np.nan, "r_peak_freq": np.nan,
             "r_profile": [np.nan] * 11, "in_band_ratio": 0.0,
+            "n_windows": 0,
         }
 
     r_arr = np.array(r_series)
     f_arr = np.array(f_series)
+    n_windows = len(r_arr)
 
-    # Fractions where an actual pole in SPINDLE_BAND was resolved (r > 0)
+    # Fraction of windows where an actual pole in SPINDLE_BAND was resolved (r > 0)
     valid_mask = r_arr > 0
     in_band_ratio = float(np.mean(valid_mask))
-    valid_r = r_arr[valid_mask] if np.any(valid_mask) else r_arr
+
+    if not np.any(valid_mask):
+        # No window in this event ever resolved an in-band pole. This is a
+        # fit failure for the event, not evidence of a "zero R" spindle -
+        # return NaN so it gets excluded from calibration stats via dropna,
+        # instead of silently contributing a 0.0 that drags percentiles down.
+        return {
+            "r_max": np.nan, "r_min": np.nan, "r_mean": np.nan,
+            "r_start": np.nan, "r_end": np.nan, "r_peak_freq": np.nan,
+            "r_profile": [np.nan] * 11, "in_band_ratio": in_band_ratio,
+            "n_windows": n_windows,
+        }
+
+    valid_r = r_arr[valid_mask]
 
     peak_idx = int(np.argmax(r_arr))
     r_max = float(r_arr[peak_idx])
@@ -240,6 +276,7 @@ def analyze_spindle_r_dynamics(
         "r_peak_freq": r_peak_freq,
         "r_profile": profile,
         "in_band_ratio": in_band_ratio,
+        "n_windows": n_windows,
     }
 
 
@@ -258,7 +295,7 @@ def process_group(data_path: str, event_rows: List[Tuple]) -> List[Tuple]:
 # --------------------------------------------------------------------------- #
 def compute_all_dynamics(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
     events = events.copy()
-    for col in ["r_max", "r_min", "r_mean", "r_start", "r_end", "r_peak_freq", "in_band_ratio"]:
+    for col in ["r_max", "r_min", "r_mean", "r_start", "r_end", "r_peak_freq", "in_band_ratio", "n_windows"]:
         events[col] = np.nan
 
     profile_cols = [f"r_profile_{p}%" for p in range(0, 101, 10)]
@@ -272,13 +309,22 @@ def compute_all_dynamics(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
     for (rat_number, region, date, trial, channel), group in events.groupby(group_cols):
         task = find_task(lookup, rat_number, region, date, trial, channel)
         if task is None:
-            unmatched.append({"rat": rat_number, "region": region, "date": date, "trial": trial, "chan": channel})
+            unmatched.append({"rat": rat_number, "region": region, "date": date, "trial": trial, "chan": channel,
+                               "n_events": len(group)})
             continue
         jobs[task["data_path"]] = list(zip(group.index, group[START_COL], group[END_COL]))
 
     if unmatched:
-        pd.DataFrame(unmatched).drop_duplicates().to_csv(OUTPUT_DIR / "unmatched_manifest.csv", index=False)
-        logger.warning(f"{len(unmatched)} group(s) could not be matched to raw data.")
+        unmatched_df = pd.DataFrame(unmatched).drop_duplicates(subset=["rat", "region", "date", "trial", "chan"])
+        unmatched_df.to_csv(OUTPUT_DIR / "unmatched_manifest.csv", index=False)
+        total_unmatched_events = unmatched_df["n_events"].sum()
+        logger.warning(
+            f"{len(unmatched_df)} group(s) ({total_unmatched_events} events) could not be matched to raw data."
+        )
+        # Flag if unmatched groups are concentrated in one region - this can
+        # masquerade as a "low R" region if it's actually a lookup/key mismatch.
+        by_region = unmatched_df.groupby("region")["n_events"].sum().sort_values(ascending=False)
+        logger.warning(f"Unmatched events by region:\n{by_region.to_string()}")
 
     logger.info(f"Analyzing {len(events)} events across {len(jobs)} files using {MAX_WORKERS} workers...")
 
@@ -294,6 +340,7 @@ def compute_all_dynamics(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
                     events.at[idx, "r_end"] = metrics["r_end"]
                     events.at[idx, "r_peak_freq"] = metrics["r_peak_freq"]
                     events.at[idx, "in_band_ratio"] = metrics["in_band_ratio"]
+                    events.at[idx, "n_windows"] = metrics["n_windows"]
                     for col_name, val in zip(profile_cols, metrics["r_profile"]):
                         events.at[idx, col_name] = val
             except Exception as e:
@@ -305,11 +352,67 @@ def compute_all_dynamics(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # 5. Statistical Aggregations & Hysteresis Guidance
 # --------------------------------------------------------------------------- #
-def generate_summary_tables(df: pd.DataFrame):
-    valid = df.dropna(subset=["r_max", "r_min"]).copy()
-    if valid.empty:
-        logger.error("No valid AR events processed.")
+def generate_fit_quality_report(df: pd.DataFrame):
+    """
+    Reports, per region, how often the AR fit failed to resolve an in-band pole
+    at all (in_band_ratio == 0) and how many events are excluded from
+    calibration by the MIN_IN_BAND_RATIO gate. This is the diagnostic that
+    would have surfaced the PL region issue instead of it showing up silently
+    as a 0.000 threshold.
+    """
+    has_metrics = df.dropna(subset=["in_band_ratio"]).copy()
+    if has_metrics.empty:
+        logger.error("No events had AR metrics computed at all (fit stage produced nothing).")
         return
+
+    records = []
+    for region, reg_df in has_metrics.groupby("region"):
+        n = len(reg_df)
+        n_total_fail = int((reg_df["in_band_ratio"] == 0).sum())
+        n_below_gate = int((reg_df["in_band_ratio"] < MIN_IN_BAND_RATIO).sum())
+        records.append({
+            "Region": region,
+            "N_Events": n,
+            "Mean_In_Band_Ratio": round(float(reg_df["in_band_ratio"].mean()), 3),
+            "Pct_Complete_Fit_Failure (ratio==0)": round(100 * n_total_fail / n, 2),
+            f"Pct_Below_Gate (<{MIN_IN_BAND_RATIO})": round(100 * n_below_gate / n, 2),
+        })
+
+    report = pd.DataFrame(records)
+    report.to_csv(OUTPUT_DIR / "fit_quality_report.csv", index=False)
+
+    print("\n" + "=" * 80)
+    print("AR FIT QUALITY BY REGION (diagnose before trusting thresholds below)")
+    print("=" * 80)
+    print(report.to_string(index=False))
+    print(
+        "\nNote: events with in_band_ratio == 0 never resolved an in-band AR pole "
+        "in ANY sliding window and are excluded (NaN) from all r_* statistics. "
+        f"Events with in_band_ratio below {MIN_IN_BAND_RATIO} are additionally "
+        "excluded from the calibration tables below as low-confidence fits. "
+        "A region with a high failure/exclusion rate needs its raw data / manifest "
+        "matching / band settings checked before its threshold numbers are used.\n"
+    )
+
+
+def generate_summary_tables(df: pd.DataFrame):
+    # Exclude events with no in-band pole resolved anywhere (now NaN, see
+    # analyze_spindle_r_dynamics) AND events with too few in-band windows to
+    # trust the resulting r_max/r_min as a real spindle signature rather than
+    # a fit artifact.
+    valid = df.dropna(subset=["r_max", "r_min"]).copy()
+    valid = valid[valid["in_band_ratio"] >= MIN_IN_BAND_RATIO].copy()
+
+    if valid.empty:
+        logger.error("No valid AR events processed after quality filtering.")
+        return
+
+    n_before = df["r_max"].notna().sum() if "r_max" in df else 0
+    logger.info(
+        f"Calibration will use {len(valid)} events "
+        f"(in_band_ratio >= {MIN_IN_BAND_RATIO}); "
+        f"{n_before - len(valid)} additional fitted events excluded as low-confidence."
+    )
 
     # A. Pooled Regional Summary across all rats
     quantiles = [0.05, 0.25, 0.50, 0.75, 0.95]
@@ -347,6 +450,7 @@ def generate_summary_tables(df: pd.DataFrame):
 
         calib.append({
             "Region": region,
+            "N_Spindles_Used": len(reg_df),
             "Target_Upper_Threshold (Catch 75%)": round(p25_max, 3),
             "Target_Upper_Threshold (Median)": round(p50_max, 3),
             "Recommended_Lower_Threshold": round(min(p10_min, p25_end), 3),
@@ -389,6 +493,7 @@ def main():
     analyzed_events.to_csv(raw_out, index=False)
     logger.info(f"Saved full event-level dynamics to {raw_out}")
 
+    generate_fit_quality_report(analyzed_events)
     generate_summary_tables(analyzed_events)
 
 
