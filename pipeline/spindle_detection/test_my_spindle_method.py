@@ -347,5 +347,6 @@ if __name__ == "__main__":
     loader = TaskLoader(
         "/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/tasks_manifest.csv"
     )
+    loader = loader.filter(rat="1")
     tasks_to_run = loader.to_tasks()
     run_extraction(tasks_to_run)
