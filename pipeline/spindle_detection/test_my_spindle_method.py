@@ -22,9 +22,9 @@ from task_loader import TaskLoader
 FS = 1000
 BUFFER_SEC = 1.0
 REGION_THRESHOLDS = {
-    "HPC": {"upper": 0.85, "lower": 0.74},
-    "PL":  {"upper": 0.85, "lower": 0.72},
-    "RSC": {"upper": 0.90, "lower": 0.77},
+    "HPC": {"upper": 0.84, "lower": 0.68},
+    "PL":  {"upper": 0.82, "lower": 0.67},
+    "RSC": {"upper": 0.86, "lower": 0.72},
 }
 STRIDE = 4
 BAND = (10, 15)
@@ -146,7 +146,7 @@ def extract_spindles_for_file(task: Dict, thresholds: Dict[str, float]) -> pd.Da
             lower_threshold=thresholds["lower"],
             spindle_band=BAND,
             min_duration_sec=0.4,
-            max_duration_sec=3.5,
+            max_duration_sec=None,
             n_jobs=INNER_N_JOBS,
         )
 
@@ -347,6 +347,5 @@ if __name__ == "__main__":
     loader = TaskLoader(
         "/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/tasks_manifest.csv"
     )
-    loader = loader.filter(rat="1")
     tasks_to_run = loader.to_tasks()
     run_extraction(tasks_to_run)
