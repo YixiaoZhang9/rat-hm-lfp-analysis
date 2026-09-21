@@ -80,7 +80,7 @@ AR_WINDOW_SEC = 1.0
 
 # Paper-faithful sliding window spacing.
 # One sample at 128 Hz = 7.8125 ms.
-STRIDE_SAMPLES = 1
+STRIDE_SAMPLES = 8
 
 START_COL = "spindle_start_time_s"
 END_COL = "spindle_end_time_s"
