@@ -4,7 +4,9 @@ Spindle Alignment Inspector (AR vs Wavelet)
 
 Lets you page through detected spindle events from two detectors (an
 autoregressive/"AR" detector and a wavelet detector) overlaid on the raw and
-band-passed LFP trace for a given rat / region / recording.
+band-passed LFP trace. The live AR analysis deliberately uses WAVELET events
+as the event definition and measures AR pole-radius dynamics without applying
+an AR R threshold to those events.
 
 Usage:
     python spindle_viewer.py \
@@ -30,7 +32,7 @@ import pandas as pd
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 from scipy.io import loadmat
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, resample_poly
 
 # --------------------------------------------------------------------------- #
 # Optional: on-the-fly AR "R" profile computation for AR-detected events.
@@ -50,18 +52,10 @@ from scipy.signal import butter, filtfilt
 # --------------------------------------------------------------------------- #
 _AR_LIVE_IMPORT_ERROR = None
 try:
-    AR_MODULES_ROOT = os.environ.get(
-        "AR_MODULES_ROOT",
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")),
-    )
-    if AR_MODULES_ROOT not in sys.path:
-        sys.path.append(AR_MODULES_ROOT)
-    from modules.ephys_preprocessing import bandpass_filter as ar_bandpass_filter
-    from modules.ephys_preprocessing import downsampling as ar_downsampling
-    from modules.find_spindles_lfp_o_quality import _fit_window as ar_fit_window
+    import statsmodels.api as sm
 
     AR_LIVE_ANALYSIS_AVAILABLE = True
-except Exception as _e:  # pragma: no cover - depends on the caller's own repo layout
+except Exception as _e:  # pragma: no cover - depends on the local environment
     AR_LIVE_ANALYSIS_AVAILABLE = False
     _AR_LIVE_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
@@ -86,6 +80,11 @@ AR_ORDER = 8
 AR_SPINDLE_BAND = (BP_LOW, BP_HIGH)
 AR_WINDOW_SEC = 1.0
 AR_STRIDE_SAMPLES = 4
+
+# Maximum frequency jump allowed when following the same AR pole from one
+# window to the next. If no candidate is close enough, that window is marked
+# missing rather than silently switching to another oscillator.
+AR_MAX_FREQUENCY_JUMP_HZ = 2.0
 
 REQUIRED_MANIFEST_COLS = {"rat", "region", "date", "data_path"}
 
@@ -119,6 +118,162 @@ def build_profile_curve(events_df: pd.DataFrame):
     return np.array(xs, dtype=float), np.array(ys, dtype=float)
 
 
+def _fit_window_all_poles(window, ar_order, target_fs, spindle_band):
+    """Fit AR(p) with Burg and return all positive-frequency poles in-band.
+
+    This is intentionally local to the viewer so the analysis is reproducible
+    from this one file and does not depend on the event-detection function.
+    The AR calculation is a measurement only: it does NOT decide whether a
+    wavelet event is a spindle.
+    """
+    try:
+        window = np.asarray(window, dtype=float)
+        if window.ndim != 1 or len(window) <= ar_order + 2:
+            return []
+        if not np.all(np.isfinite(window)):
+            return []
+
+        a, _sigma2 = sm.regression.linear_model.burg(
+            window,
+            order=ar_order,
+            demean=False,
+        )
+        a = np.asarray(a, dtype=float)
+
+        roots = np.roots(np.r_[1.0, -a])
+        low_f, high_f = spindle_band
+        delta = 1.0 / float(target_fs)
+
+        poles = []
+        for z in roots:
+            # For a real-valued AR model, conjugate roots represent the same
+            # oscillatory mode. Keep only the positive-frequency member.
+            if np.imag(z) <= 0:
+                continue
+
+            radius = float(np.abs(z))
+            phase = float(np.angle(z))
+            frequency = phase / (2.0 * np.pi * delta)
+
+            if low_f <= frequency <= high_f:
+                poles.append({
+                    "radius": radius,
+                    "frequency": frequency,
+                    "root": z,
+                })
+
+        return poles
+
+    except Exception:
+        return []
+
+
+def _select_tracked_pole(
+    poles,
+    previous_frequency,
+    spindle_band,
+    max_frequency_jump_hz=AR_MAX_FREQUENCY_JUMP_HZ,
+):
+    """Select a spindle-band pole while maintaining frequency continuity."""
+    low_f, high_f = spindle_band
+    candidates = []
+
+    for pole in poles or []:
+        try:
+            r = float(pole["radius"])
+            f = float(pole["frequency"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if np.isfinite(r) and np.isfinite(f) and low_f <= f <= high_f:
+            candidates.append((r, f))
+
+    if not candidates:
+        return np.nan, np.nan
+
+    # At the beginning of an event there is no trajectory to follow, so use
+    # the strongest in-band pole as the initial oscillator.
+    if previous_frequency is None or not np.isfinite(previous_frequency):
+        return max(candidates, key=lambda x: x[0])
+
+    # There may be several simultaneous spindle-frequency modes. Follow the
+    # one closest in frequency to the previous estimate.
+    r, f = min(candidates, key=lambda x: abs(x[1] - previous_frequency))
+
+    if max_frequency_jump_hz is not None:
+        if abs(f - previous_frequency) > float(max_frequency_jump_hz):
+            return np.nan, np.nan
+
+    return r, f
+
+
+def _empty_r_dynamics_result():
+    return {
+        "r_max": np.nan,
+        "r_min": np.nan,
+        "r_mean": np.nan,
+        "r_median": np.nan,
+        "r_start": np.nan,
+        "r_end": np.nan,
+        "r_peak_freq": np.nan,
+        "r_peak_time": np.nan,
+        "r_area": np.nan,
+        "r_profile": [np.nan] * len(PROFILE_COLS),
+        "r_times": [],
+        "r_values": [],
+        "frequency_values": [],
+        "in_band_ratio": 0.0,
+        "n_windows": 0,
+    }
+
+
+def _interpolate_r_profile(t_arr, r_arr, n_points=11):
+    """Create a normalized 0-100% profile from the raw AR trajectory."""
+    if n_points <= 0:
+        return []
+
+    t_arr = np.asarray(t_arr, dtype=float)
+    r_arr = np.asarray(r_arr, dtype=float)
+    valid = np.isfinite(t_arr) & np.isfinite(r_arr)
+
+    if not np.any(valid):
+        return [np.nan] * n_points
+
+    t_valid = t_arr[valid]
+    r_valid = r_arr[valid]
+
+    if len(r_valid) == 1 or t_valid[-1] <= t_valid[0]:
+        return [float(r_valid[0])] * n_points
+
+    x = (t_valid - t_valid[0]) / (t_valid[-1] - t_valid[0])
+    x_profile = np.linspace(0.0, 1.0, n_points)
+    return np.interp(x_profile, x, r_valid).astype(float).tolist()
+
+
+def build_live_ar_profile_curve(events_df: pd.DataFrame):
+    """Build a curve from raw live AR R(t) trajectories stored per event."""
+    if events_df.empty or "_ar_r_times" not in events_df.columns:
+        return np.array([]), np.array([])
+
+    xs, ys = [], []
+    for _, row in events_df.iterrows():
+        try:
+            t = np.asarray(row.get("_ar_r_times"), dtype=float)
+            r = np.asarray(row.get("_ar_r_values"), dtype=float)
+        except Exception:
+            continue
+
+        if len(t) == 0 or len(t) != len(r):
+            continue
+
+        xs.extend(t.tolist())
+        ys.extend(r.tolist())
+        xs.append(np.nan)
+        ys.append(np.nan)
+
+    return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+
+
 def analyze_spindle_r_dynamics(
     signal_128: np.ndarray,
     start_s: float,
@@ -128,80 +283,114 @@ def analyze_spindle_r_dynamics(
     target_fs: int = AR_TARGET_FS,
     spindle_band=AR_SPINDLE_BAND,
     ar_order: int = AR_ORDER,
+    max_frequency_jump_hz: float = AR_MAX_FREQUENCY_JUMP_HZ,
 ) -> dict:
-    """Ported from compute_spindle_ar_r_values.py: slides a 1.0s AR window
-    across [start_s, end_s], calling the real _fit_window from
-    modules.find_spindles_lfp_o_quality, and returns the same
-    peak/min/mean/start/end/profile/in_band_ratio metrics that script
-    produces - computed live here instead of read from a pre-built CSV.
+    """Measure AR pole dynamics for a WAVELET-DEFINED event.
 
-    r_max/r_min/r_mean are NaN (not 0.0) when no sliding window resolved an
-    in-band AR pole, matching the calibration script's fixed handling: a
-    0.0 R-value is indistinguishable from "no pole found" otherwise.
+    The wavelet event [start_s, end_s] is the event definition. No R
+    threshold is used to accept/reject it. Each 1-s AR window is centered at
+    successive positions spanning the event, so the first/last windows can
+    extend roughly half a window outside the event.
+
+    The strongest spindle-band pole initializes the trajectory. Subsequent
+    windows follow the pole closest in frequency to the previous estimate.
     """
-    win_samples = int(window_sec * target_fs)
+    try:
+        start_s = float(start_s)
+        end_s = float(end_s)
+    except (TypeError, ValueError):
+        return _empty_r_dynamics_result()
+
+    if not np.isfinite(start_s) or not np.isfinite(end_s) or end_s <= start_s:
+        return _empty_r_dynamics_result()
+
+    win_samples = int(round(window_sec * target_fs))
     half_win = win_samples // 2
+    if win_samples <= 0 or stride_samples <= 0:
+        return _empty_r_dynamics_result()
 
     c_start = int(round(start_s * target_fs))
     c_end = int(round(end_s * target_fs))
-
     centers = np.arange(c_start, max(c_start + 1, c_end + 1), stride_samples)
-    r_series, f_series = [], []
+
+    r_series, f_series, t_series = [], [], []
+    previous_frequency = None
 
     for c in centers:
         w_start = c - half_win
         w_end = w_start + win_samples
         if w_start < 0 or w_end > len(signal_128):
             continue
-        r_val, f_val = ar_fit_window(signal_128[w_start:w_end], ar_order, target_fs, spindle_band)
+
+        poles = _fit_window_all_poles(
+            signal_128[w_start:w_end],
+            ar_order,
+            target_fs,
+            spindle_band,
+        )
+
+        r_val, f_val = _select_tracked_pole(
+            poles,
+            previous_frequency,
+            spindle_band,
+            max_frequency_jump_hz=max_frequency_jump_hz,
+        )
+
+        center_time = c / float(target_fs)
+        t_series.append(center_time)
         r_series.append(r_val)
         f_series.append(f_val)
 
-    if not r_series:
-        return {
-            "r_max": np.nan, "r_min": np.nan, "r_mean": np.nan,
-            "r_start": np.nan, "r_end": np.nan, "r_peak_freq": np.nan,
-            "r_profile": [np.nan] * len(PROFILE_COLS), "in_band_ratio": 0.0,
-            "n_windows": 0,
-        }
+        if np.isfinite(f_val):
+            previous_frequency = f_val
 
-    r_arr = np.array(r_series)
-    f_arr = np.array(f_series)
+    if not r_series:
+        return _empty_r_dynamics_result()
+
+    t_arr = np.asarray(t_series, dtype=float)
+    r_arr = np.asarray(r_series, dtype=float)
+    f_arr = np.asarray(f_series, dtype=float)
     n_windows = len(r_arr)
 
-    valid_mask = r_arr > 0
+    valid_mask = np.isfinite(r_arr) & np.isfinite(f_arr)
     in_band_ratio = float(np.mean(valid_mask))
 
     if not np.any(valid_mask):
-        return {
-            "r_max": np.nan, "r_min": np.nan, "r_mean": np.nan,
-            "r_start": np.nan, "r_end": np.nan, "r_peak_freq": np.nan,
-            "r_profile": [np.nan] * len(PROFILE_COLS), "in_band_ratio": in_band_ratio,
-            "n_windows": n_windows,
-        }
+        result = _empty_r_dynamics_result()
+        result["in_band_ratio"] = in_band_ratio
+        result["n_windows"] = n_windows
+        result["r_times"] = t_arr.tolist()
+        result["r_values"] = r_arr.tolist()
+        result["frequency_values"] = f_arr.tolist()
+        return result
 
+    valid_idx = np.flatnonzero(valid_mask)
+    valid_t = t_arr[valid_mask]
     valid_r = r_arr[valid_mask]
-    peak_idx = int(np.argmax(r_arr))
+    valid_f = f_arr[valid_mask]
 
-    if len(r_arr) >= 2:
-        x_norm = np.linspace(0, 1, len(r_arr))
-        try:
-            from scipy.interpolate import interp1d
-            interpolator = interp1d(x_norm, r_arr, kind="linear", bounds_error=False, fill_value="extrapolate")
-            profile = interpolator(np.linspace(0, 1, len(PROFILE_COLS))).tolist()
-        except Exception:
-            profile = np.interp(np.linspace(0, 1, len(PROFILE_COLS)), x_norm, r_arr).tolist()
+    peak_local = int(np.argmax(valid_r))
+    peak_global = int(valid_idx[peak_local])
+
+    if len(valid_t) >= 2:
+        r_area = float(np.trapz(valid_r, valid_t))
     else:
-        profile = [float(r_arr[0])] * len(PROFILE_COLS)
+        r_area = np.nan
 
     return {
-        "r_max": float(r_arr[peak_idx]),
+        "r_max": float(valid_r[peak_local]),
         "r_min": float(np.min(valid_r)),
         "r_mean": float(np.mean(valid_r)),
-        "r_start": float(r_arr[0]),
-        "r_end": float(r_arr[-1]),
-        "r_peak_freq": float(f_arr[peak_idx]),
-        "r_profile": profile,
+        "r_median": float(np.median(valid_r)),
+        "r_start": float(valid_r[0]),
+        "r_end": float(valid_r[-1]),
+        "r_peak_freq": float(valid_f[peak_local]),
+        "r_peak_time": float(t_arr[peak_global]),
+        "r_area": r_area,
+        "r_profile": _interpolate_r_profile(t_arr, r_arr, len(PROFILE_COLS)),
+        "r_times": t_arr.tolist(),
+        "r_values": r_arr.tolist(),
+        "frequency_values": f_arr.tolist(),
         "in_band_ratio": in_band_ratio,
         "n_windows": n_windows,
     }
@@ -221,22 +410,62 @@ class ARProfileWorker(QtCore.QThread):
 
     def run(self):
         try:
-            filtered = ar_bandpass_filter(self.raw_signal, lowcut=0.1, highcut=100, fs=FS)
-            signal_128 = ar_downsampling(filtered, FS, AR_TARGET_FS)
+            filtered = butter_bandpass_filter(
+                self.raw_signal,
+                0.1,
+                100.0,
+                FS,
+            )
+            signal_128 = downsample_signal(
+                filtered,
+                FS,
+                AR_TARGET_FS,
+            )
+
             results = {}
             for idx, start_s, end_s in self.events:
-                results[idx] = analyze_spindle_r_dynamics(signal_128, start_s, end_s)
+                results[idx] = analyze_spindle_r_dynamics(
+                    signal_128,
+                    start_s,
+                    end_s,
+                )
+
             self.finished_ok.emit(results)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - surface any failure to the UI
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 
-    nyq = 0.5 * fs
-    low = max(0.001, lowcut / nyq)
-    high = min(0.999, highcut / nyq)
+def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
+    """Zero-phase Butterworth band-pass used by the viewer."""
+    data = np.asarray(data, dtype=float)
+    nyq = 0.5 * float(fs)
+    low = max(0.001, float(lowcut) / nyq)
+    high = min(0.999, float(highcut) / nyq)
+    if not 0 < low < high < 1:
+        raise ValueError(f"Invalid band-pass limits: {lowcut}-{highcut} Hz at fs={fs}")
     b, a = butter(order, [low, high], btype="band")
     return filtfilt(b, a, data)
+
+
+def downsample_signal(data, original_fs, target_fs):
+    """Resample to target_fs using polyphase resampling."""
+    original_fs = float(original_fs)
+    target_fs = float(target_fs)
+
+    if original_fs <= 0 or target_fs <= 0:
+        raise ValueError("Sampling rates must be positive")
+
+    # For 1000 -> 128 Hz this is exactly 16/125.
+    from math import gcd
+
+    fs_in = int(round(original_fs))
+    fs_out = int(round(target_fs))
+    g = gcd(fs_in, fs_out)
+    up = fs_out // g
+    down = fs_in // g
+
+    return resample_poly(np.asarray(data), up, down)
 
 
 def clean_str(val):
@@ -496,7 +725,7 @@ class SpindleViewer(QtWidgets.QMainWindow):
         lbl_maxr_legend.setStyleSheet("color: #ff5722; font-weight: bold;")
         nav_layout.addWidget(lbl_maxr_legend)
 
-        lbl_ar_profile_legend = QtWidgets.QLabel("— AR R profile (live-computed)")
+        lbl_ar_profile_legend = QtWidgets.QLabel("— AR R on wavelet events (live)")
         lbl_ar_profile_legend.setStyleSheet("color: #ffab40; font-weight: bold;")
         nav_layout.addWidget(lbl_ar_profile_legend)
 
@@ -539,10 +768,8 @@ class SpindleViewer(QtWidgets.QMainWindow):
             symbolBrush="#ff5722",
             symbolPen=pg.mkPen(color="w", width=0.5),
         )
-        # Live-computed R(t) trend across each AR event's duration, built by
-        # calling the real AR-fitting pipeline (analyze_spindle_r_dynamics /
-        # _fit_window) on the raw trace - not read from any CSV, since the AR
-        # detections CSV never stored a within-event profile to begin with.
+        # Live-computed AR pole-radius trend across each WAVELET event.
+        # The wavelet event defines the interval; AR R is only a measurement.
         self.curve_ar_r_profile = self.p_r.plot(
             pen=pg.mkPen(color="#ffab40", width=2),
             connect="finite",
@@ -897,24 +1124,32 @@ class SpindleViewer(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------ Live AR R profile ---
     def _start_ar_profile_computation(self):
+        """Compute AR R(t) on WAVELET-defined events only.
+
+        This is the key analysis separation:
+            wavelet detector -> defines event start/end
+            AR poles          -> quantify oscillatory dynamics within event
+
+        No AR R threshold is used to create or reject the wavelet event.
+        """
         if not AR_LIVE_ANALYSIS_AVAILABLE:
             if _AR_LIVE_IMPORT_ERROR:
                 self.status_bar.showMessage(
-                    f"AR R-profile modules not importable ({_AR_LIVE_IMPORT_ERROR}); "
-                    f"showing Max_R points only for AR events. Set AR_MODULES_ROOT "
-                    f"if your repo layout differs.",
+                    f"AR R-profile analysis unavailable ({_AR_LIVE_IMPORT_ERROR}).",
                     12000,
                 )
             return
 
-        if self.current_ar_events.empty or self.raw_signal is None:
+        if self.current_wavelet_events.empty or self.raw_signal is None:
             return
 
         events = []
-        for idx, row in self.current_ar_events.iterrows():
-            s, e = safe_float(row.get("Start_s")), safe_float(row.get("End_s"))
-            if not (np.isnan(s) or np.isnan(e)) and e > s:
+        for idx, row in self.current_wavelet_events.iterrows():
+            s = safe_float(row.get("Start_s"))
+            e = safe_float(row.get("End_s"))
+            if np.isfinite(s) and np.isfinite(e) and e > s:
                 events.append((idx, s, e))
+
         if not events:
             return
 
@@ -922,38 +1157,64 @@ class SpindleViewer(QtWidgets.QMainWindow):
             self._ar_profile_thread.quit()
             self._ar_profile_thread.wait()
 
-        self.status_bar.showMessage(f"Computing live AR R profiles for {len(events)} event(s) ...")
-        self._ar_profile_thread = ARProfileWorker(self.raw_signal, events)
+        self.status_bar.showMessage(
+            f"Computing AR pole-radius dynamics for {len(events)} wavelet event(s) ..."
+        )
+
+        self._ar_profile_thread = ARProfileWorker(
+            self.raw_signal,
+            events,
+        )
         self._ar_profile_thread.finished_ok.connect(self._on_ar_profiles_ready)
         self._ar_profile_thread.failed.connect(self._on_ar_profiles_failed)
         self._ar_profile_thread.start()
 
     def _on_ar_profiles_failed(self, message):
-        self.status_bar.showMessage(f"AR R-profile computation failed: {message}", 12000)
+        self.status_bar.showMessage(
+            f"AR R-profile computation failed: {message}",
+            12000,
+        )
 
     def _on_ar_profiles_ready(self, results):
         self.status_bar.clearMessage()
+
         for idx, metrics in results.items():
-            if idx not in self.current_ar_events.index:
+            if idx not in self.current_wavelet_events.index:
                 continue
-            self.current_ar_events.at[idx, "r_max"] = metrics["r_max"]
-            self.current_ar_events.at[idx, "r_min"] = metrics["r_min"]
-            self.current_ar_events.at[idx, "r_mean"] = metrics["r_mean"]
-            self.current_ar_events.at[idx, "r_start"] = metrics["r_start"]
-            self.current_ar_events.at[idx, "r_end"] = metrics["r_end"]
-            self.current_ar_events.at[idx, "r_peak_freq_live"] = metrics["r_peak_freq"]
-            self.current_ar_events.at[idx, "in_band_ratio"] = metrics["in_band_ratio"]
-            self.current_ar_events.at[idx, "n_windows"] = metrics["n_windows"]
+
+            self.current_wavelet_events.at[idx, "live_r_max"] = metrics["r_max"]
+            self.current_wavelet_events.at[idx, "live_r_min"] = metrics["r_min"]
+            self.current_wavelet_events.at[idx, "live_r_mean"] = metrics["r_mean"]
+            self.current_wavelet_events.at[idx, "live_r_median"] = metrics["r_median"]
+            self.current_wavelet_events.at[idx, "live_r_start"] = metrics["r_start"]
+            self.current_wavelet_events.at[idx, "live_r_end"] = metrics["r_end"]
+            self.current_wavelet_events.at[idx, "live_r_peak_freq"] = metrics["r_peak_freq"]
+            self.current_wavelet_events.at[idx, "live_r_peak_time"] = metrics["r_peak_time"]
+            self.current_wavelet_events.at[idx, "live_r_area"] = metrics["r_area"]
+            self.current_wavelet_events.at[idx, "ar_pole_presence"] = metrics["in_band_ratio"]
+            self.current_wavelet_events.at[idx, "ar_n_windows"] = metrics["n_windows"]
+
+            # Keep the raw trajectories in memory. They are the primary
+            # measurement; the normalized profile is only a visualization.
+            self.current_wavelet_events.at[idx, "_ar_r_times"] = metrics["r_times"]
+            self.current_wavelet_events.at[idx, "_ar_r_values"] = metrics["r_values"]
+            self.current_wavelet_events.at[idx, "_ar_frequencies"] = metrics["frequency_values"]
+
             for col, val in zip(PROFILE_COLS, metrics["r_profile"]):
-                self.current_ar_events.at[idx, col] = val
+                self.current_wavelet_events.at[idx, f"live_{col}"] = val
 
-        x_prof, y_prof = build_profile_curve(self.current_ar_events)
-        if len(x_prof):
-            self.curve_ar_r_profile.setData(x_prof, y_prof)
+        # Plot live AR R(t) at the actual AR-window center times.
+        x_raw, y_raw = build_live_ar_profile_curve(
+            self.current_wavelet_events
+        )
+        if len(x_raw):
+            self.curve_ar_r_profile.setData(x_raw, y_raw)
+        else:
+            self.curve_ar_r_profile.clear()
 
-        # Refresh the focused event's panel now that live metrics exist.
-        if self.current_ar_idx >= 0:
-            self.jump_to_ar_event()
+        # Refresh the focused wavelet event so its live metrics appear.
+        if self.current_wav_idx >= 0:
+            self.jump_to_wav_event()
 
 
 
@@ -1073,13 +1334,11 @@ class SpindleViewer(QtWidgets.QMainWindow):
         live_max = event.get("r_max", np.nan)
         if not np.isnan(safe_float(live_max)):
             lines.append(
-                f"Live AR fit: R max={fmt(live_max)} min={fmt(event.get('r_min', np.nan))} "
-                f"mean={fmt(event.get('r_mean', np.nan))} | "
-                f"in_band_ratio={fmt(event.get('in_band_ratio', np.nan), '.2f')} "
-                f"({int(safe_float(event.get('n_windows', 0), 0))} windows)"
+                f"CSV AR event metric: Max R={fmt(live_max)} | "
+                f"mean={fmt(event.get('r_mean', np.nan))}"
             )
         elif AR_LIVE_ANALYSIS_AVAILABLE:
-            lines.append("Live AR fit: computing...")
+            lines.append("Live AR measurement is performed on wavelet events, not AR events.")
 
         lines.append(f"Alignment Status: {align_desc}")
         self.details_panel.setText("\n".join(lines))
@@ -1110,11 +1369,35 @@ class SpindleViewer(QtWidgets.QMainWindow):
         )
 
         dur = end_s - start_s
-        info = (
+        info_lines = [
             f"[Focus: Wavelet Spindle #{self.current_wav_idx + 1}/{len(self.current_wavelet_events)}] "
-            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)\n"
-            f"Alignment Status: {align_desc}"
+            f"Interval: [{start_s:.3f}s - {end_s:.3f}s] (Duration: {dur:.3f}s)",
+        ]
+
+        live_max = safe_float(event.get("live_r_max"))
+        if np.isfinite(live_max):
+            info_lines.append(
+                f"Live AR measurement: R max={fmt(live_max)} | "
+                f"mean={fmt(event.get('live_r_mean', np.nan))} | "
+                f"median={fmt(event.get('live_r_median', np.nan))} | "
+                f"start={fmt(event.get('live_r_start', np.nan))} | "
+                f"end={fmt(event.get('live_r_end', np.nan))}"
+            )
+            info_lines.append(
+                f"Peak frequency={fmt(event.get('live_r_peak_freq', np.nan), '.2f')} Hz | "
+                f"Peak time={fmt(event.get('live_r_peak_time', np.nan), '.3f')} s | "
+                f"AR pole presence={fmt(event.get('ar_pole_presence', np.nan), '.2f')} | "
+                f"{int(safe_float(event.get('ar_n_windows', 0), 0))} windows"
+            )
+        elif AR_LIVE_ANALYSIS_AVAILABLE:
+            info_lines.append("Live AR measurement: computing...")
+
+        info_lines.append(
+            "AR R is measured on this wavelet-defined event; no R threshold "
+            "was used to define the event."
         )
+        info_lines.append(f"Alignment Status: {align_desc}")
+        info = "\n".join(info_lines)
         self.details_panel.setText(info)
         self.lbl_wav_tracker.setText(f"WAV: {self.current_wav_idx + 1} / {len(self.current_wavelet_events)}")
 
