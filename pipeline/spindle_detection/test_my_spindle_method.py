@@ -27,7 +27,7 @@ REGION_THRESHOLDS = {
     "RSC": {"upper": 0.86, "lower": 0.72},
 }
 STRIDE = 4
-BAND = (10, 15)
+BAND = (9, 20)
 
 # Each call to find_spindles_lfp does its own internal joblib parallelism across
 # windows. We're already parallelizing across FILES via ProcessPoolExecutor below,
