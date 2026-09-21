@@ -163,8 +163,7 @@ def _fit_window(
     This function is intentionally retained because it may be used
     elsewhere in the application.
 
-    The main detector below uses _fit_window_all_poles() so that
-    individual oscillatory modes are not lost.
+    The detector uses the strongest spindle-band pole in each window.
     """
     frequencies, radii = _fit_window_all_poles(
         window,
@@ -425,223 +424,211 @@ def _fit_all_pole_windows(
 
 
 # ============================================================================
-# Pole tracking
+# Paper-faithful per-window pole selection
 # ============================================================================
 
-def _track_poles_by_frequency(
-    frequencies_per_window,
-    radii_per_window,
+def _select_strongest_spindle_pole(
+    frequencies,
+    radii,
     spindle_band,
-    max_frequency_jump_hz=3.0,
 ):
     """
-    Track oscillatory poles through time using frequency continuity.
+    Select the strongest spindle-band pole in ONE AR window.
 
-    Parameters
-    ----------
-    frequencies_per_window:
-        List of arrays containing positive-frequency poles.
+    A real AR(8) model has eight roots. Complex roots occur as
+    conjugate pairs, so there can be up to four oscillatory modes.
+    For spindle detection/characterization, we keep the positive-frequency
+    member of each pair, restrict to the spindle band, and select the pole
+    with the largest radius R.
 
-    radii_per_window:
-        Corresponding pole radii.
-
-    spindle_band:
-        Only poles in this frequency range are tracked.
-
-    max_frequency_jump_hz:
-        Maximum frequency difference allowed between consecutive
-        observations belonging to the same trajectory.
+    No pole identity is tracked between windows.
 
     Returns
     -------
-    tracks : list of dict
-        Each dictionary contains:
+    r : float
+        Largest spindle-band pole radius for this window.
+    f : float
+        Frequency (Hz) of that same pole.
+    """
+    if len(frequencies) == 0:
+        return 0.0, np.nan
 
-            "frequency"
-            "radius"
-            "window_index"
+    low_f, high_f = spindle_band
+
+    mask = (
+        (frequencies >= low_f)
+        & (frequencies <= high_f)
+        & np.isfinite(frequencies)
+        & np.isfinite(radii)
+    )
+
+    if not np.any(mask):
+        return 0.0, np.nan
+
+    candidate_frequencies = frequencies[mask]
+    candidate_radii = radii[mask]
+
+    best = int(np.argmax(candidate_radii))
+
+    return (
+        float(candidate_radii[best]),
+        float(candidate_frequencies[best]),
+    )
+
+
+def _fit_windows_at_starts(
+    signal,
+    starts,
+    window_samples,
+    ar_order,
+    target_fs,
+    spindle_band,
+    n_jobs,
+    verbose,
+    desc,
+):
+    """
+    Fit one AR model per window.
+
+    For each timestamp/window, retain ONLY the strongest pole in the
+    spindle band. The frequency returned is the frequency of that
+    strongest-R pole in the same window.
+
+    There is deliberately NO frequency-continuity or pole-identity
+    tracking between adjacent windows.
+    """
+    if len(starts) == 0:
+        return np.array([]), np.array([])
+
+    def fit_one(s):
+        window = signal[s : s + window_samples]
+
+        frequencies, radii = _fit_window_all_poles(
+            window,
+            ar_order,
+            target_fs,
+        )
+
+        return _select_strongest_spindle_pole(
+            frequencies,
+            radii,
+            spindle_band,
+        )
+
+    if verbose:
+        with tqdm_joblib(
+            tqdm(
+                total=len(starts),
+                desc=desc,
+                unit="win",
+            )
+        ):
+            results = Parallel(
+                n_jobs=n_jobs,
+                prefer="processes",
+            )(
+                delayed(fit_one)(s)
+                for s in starts
+            )
+    else:
+        results = Parallel(
+            n_jobs=n_jobs,
+            prefer="processes",
+        )(
+            delayed(fit_one)(s)
+            for s in starts
+        )
+
+    r_vals = np.array(
+        [r for r, f in results],
+        dtype=float,
+    )
+
+    f_vals = np.array(
+        [f for r, f in results],
+        dtype=float,
+    )
+
+    return r_vals, f_vals
+
+
+# ============================================================================
+# Public AR analysis
+# ============================================================================
+
+def fit_ar_on_prepared_signal(
+    signal,
+    target_fs=128,
+    ar_order=8,
+    window_sec=1.0,
+    stride_samples=1,
+    spindle_band=(10, 15),
+    n_jobs=1,
+    verbose=False,
+):
+    """
+    Fit AR models over overlapping windows.
+
+    Returns
+    -------
+    r_timeseries : np.ndarray
+        Strongest spindle-band pole radius in each window.
+
+    f_timeseries : np.ndarray
+        Frequency (Hz) of that same strongest-R pole in each window.
+
+    starts : np.ndarray
+        Starting sample of each AR window.
 
     Notes
     -----
-    The paper does not specify an exact pole identity-tracking
-    algorithm. This frequency-continuity tracker is therefore an
-    implementation choice.
+    Each window is evaluated independently.
 
-    It is preferable to taking the maximum-r pole independently
-    at every window because the latter can switch between different
-    oscillatory modes.
+    The frequency is allowed to change freely from one window to the next.
+    For example, one window can select 11 Hz and the next can select 12 Hz.
+
+    This function does NOT track pole identities across time.
     """
-    active_tracks = []
-    finished_tracks = []
+    window_samples = int(
+        round(window_sec * target_fs)
+    )
 
-    for window_idx, (
-        frequencies,
-        radii,
-    ) in enumerate(
-        zip(
-            frequencies_per_window,
-            radii_per_window,
-        )
-    ):
-
-        if len(frequencies) == 0:
-            # End all active tracks when there is no usable pole.
-            finished_tracks.extend(active_tracks)
-            active_tracks = []
-            continue
-
-        # Keep only poles in requested spindle band.
-        mask = (
-            (frequencies >= spindle_band[0])
-            & (frequencies <= spindle_band[1])
-            & np.isfinite(frequencies)
-            & np.isfinite(radii)
+    if len(signal) < window_samples:
+        return (
+            np.array([]),
+            np.array([]),
+            np.array([]),
         )
 
-        current_frequencies = frequencies[mask]
-        current_radii = radii[mask]
+    total_windows = (
+        len(signal)
+        - window_samples
+        + 1
+    )
 
-        if len(current_frequencies) == 0:
-            finished_tracks.extend(active_tracks)
-            active_tracks = []
-            continue
+    starts = np.arange(
+        0,
+        total_windows,
+        stride_samples,
+    )
 
-        # Each current pole can be assigned to at most one track.
-        used_current = set()
+    r_vals, f_vals = _fit_windows_at_starts(
+        signal,
+        starts,
+        window_samples,
+        ar_order,
+        target_fs,
+        spindle_band,
+        n_jobs,
+        verbose,
+        desc="AR fitting",
+    )
 
-        assignments = []
-
-        # Match existing tracks to current poles using nearest
-        # frequency difference.
-        candidate_pairs = []
-
-        for track_idx, track in enumerate(active_tracks):
-
-            previous_frequency = track["frequency"][-1]
-
-            for current_idx, current_frequency in enumerate(
-                current_frequencies
-            ):
-                difference = abs(
-                    current_frequency
-                    - previous_frequency
-                )
-
-                if difference <= max_frequency_jump_hz:
-                    candidate_pairs.append(
-                        (
-                            difference,
-                            track_idx,
-                            current_idx,
-                        )
-                    )
-
-        # Nearest-frequency assignments first.
-        candidate_pairs.sort(
-            key=lambda x: x[0]
-        )
-
-        assigned_tracks = set()
-
-        for (
-            difference,
-            track_idx,
-            current_idx,
-        ) in candidate_pairs:
-
-            if track_idx in assigned_tracks:
-                continue
-
-            if current_idx in used_current:
-                continue
-
-            assignments.append(
-                (
-                    track_idx,
-                    current_idx,
-                )
-            )
-
-            assigned_tracks.add(track_idx)
-            used_current.add(current_idx)
-
-        # Update matched tracks.
-        for (
-            track_idx,
-            current_idx,
-        ) in assignments:
-
-            track = active_tracks[track_idx]
-
-            track["frequency"].append(
-                float(
-                    current_frequencies[current_idx]
-                )
-            )
-
-            track["radius"].append(
-                float(
-                    current_radii[current_idx]
-                )
-            )
-
-            track["window_index"].append(
-                window_idx
-            )
-
-        # Tracks that were not matched are finished.
-        unmatched_tracks = []
-
-        for track_idx, track in enumerate(
-            active_tracks
-        ):
-            if track_idx not in assigned_tracks:
-                unmatched_tracks.append(track)
-
-        finished_tracks.extend(
-            unmatched_tracks
-        )
-
-        active_tracks = [
-            track
-            for track_idx, track in enumerate(
-                active_tracks
-            )
-            if track_idx in assigned_tracks
-        ]
-
-        # Create new tracks for unmatched current poles.
-        for current_idx in range(
-            len(current_frequencies)
-        ):
-            if current_idx in used_current:
-                continue
-
-            active_tracks.append(
-                {
-                    "frequency": [
-                        float(
-                            current_frequencies[
-                                current_idx
-                            ]
-                        )
-                    ],
-                    "radius": [
-                        float(
-                            current_radii[
-                                current_idx
-                            ]
-                        )
-                    ],
-                    "window_index": [
-                        window_idx
-                    ],
-                }
-            )
-
-    finished_tracks.extend(active_tracks)
-
-    return finished_tracks
+    return (
+        r_vals,
+        f_vals,
+        starts,
+    )
 
 
 # ============================================================================
@@ -825,100 +812,83 @@ def _detect_events_in_region(
 
 
 # ============================================================================
-# Corrected multi-pole event detection
+# Event detection
 # ============================================================================
 
-def _detect_events_from_tracks(
-    tracks,
-    starts,
+def _detect_events_in_region(
+    r,
+    f,
+    sample_starts,
     target_fs,
     window_samples,
     upper_threshold,
     lower_threshold,
 ):
     """
-    Detect events separately on every tracked AR oscillator.
+    Detect events from the strongest spindle-band R at each window.
 
-    This is the important correction compared with the old code.
+    Event starts when:
+        R > upper_threshold
 
-    The old implementation first selected:
+    Once active, it continues while:
+        R >= lower_threshold
 
-        max(r) across all spindle-band poles
-
-    for every window.
-
-    That can cause the time series to jump from one oscillator
-    to another. Here, each pole trajectory is treated separately.
+    The frequency f is simply the frequency associated with the
+    strongest-R pole in each individual window. It is NOT used to
+    track a pole across windows.
     """
-    all_events = []
+    events = []
 
-    for track_id, track in enumerate(tracks):
+    n = len(r)
+    i = 0
 
-        window_indices = np.asarray(
-            track["window_index"],
-            dtype=int,
-        )
+    while i < n:
 
-        frequencies = np.asarray(
-            track["frequency"],
-            dtype=float,
-        )
-
-        radii = np.asarray(
-            track["radius"],
-            dtype=float,
-        )
-
-        if len(window_indices) == 0:
+        if (
+            not np.isfinite(r[i])
+            or not np.isfinite(f[i])
+        ):
+            i += 1
             continue
 
-        # The generic event detector expects a contiguous local
-        # series. Check for gaps.
-        #
-        # If there is a gap, split the track into contiguous pieces.
-        split_points = np.where(
-            np.diff(window_indices) > 1
-        )[0]
+        if r[i] > upper_threshold:
 
-        segments = np.split(
-            np.arange(len(window_indices)),
-            split_points + 1,
-        )
+            start_i = i
+            end_i = i
 
-        for segment in segments:
+            while end_i < n - 1:
 
-            if len(segment) == 0:
-                continue
+                next_i = end_i + 1
 
-            local_f = frequencies[segment]
-            local_r = radii[segment]
-            local_starts = starts[
-                window_indices[segment]
-            ]
+                if (
+                    not np.isfinite(r[next_i])
+                    or not np.isfinite(f[next_i])
+                ):
+                    break
 
-            local_events = _detect_events_in_region(
-                local_r,
-                local_f,
-                local_starts,
+                if r[next_i] >= lower_threshold:
+                    end_i = next_i
+                    continue
+
+                break
+
+            _finalize_event(
+                events,
+                r,
+                f,
+                sample_starts,
                 target_fs,
                 window_samples,
-                upper_threshold,
-                lower_threshold,
+                start_i,
+                end_i,
             )
 
-            for event in local_events:
-                # Keep original six-column event interface.
-                all_events.append(event)
+            i = end_i + 1
 
-    # Sort by event onset.
-    if not all_events:
-        return []
+        else:
+            i += 1
 
-    all_events.sort(
-        key=lambda event: event[0]
-    )
-
-    return all_events
+    return events
 
 
 # ============================================================================
@@ -1042,110 +1012,55 @@ def find_spindles_lfp(
     upper_threshold=0.92,
     lower_threshold=0.90,
     spindle_band=(10, 15),
-    min_duration_sec=0.4,
-    max_duration_sec=3.5,
+    min_duration_sec=None,
+    max_duration_sec=None,
     n_jobs=1,
     lowcut=0.1,
     highcut=100.0,
     verbose=False,
-    max_frequency_jump_hz=3.0,
 ):
     """
-    Detect spindle-like oscillatory events using an AR model.
+    Detect spindle-like events using the paper's AR(8) approach.
+
+    Core method
+    -----------
+    1. Band-pass the signal (0.1-100 Hz by default).
+    2. Resample to 128 Hz.
+    3. Fit an AR(8) model in each overlapping 1-s window.
+    4. Calculate the AR roots/poles.
+    5. Keep positive-frequency poles in the 10-15 Hz spindle band.
+    6. Select the pole with the largest radius R IN THAT WINDOW.
+    7. Use that window's R for hysteresis detection.
+    8. The reported peak frequency is the frequency of the window's
+       maximum-R pole.
+
+    There is NO frequency-continuity tracking. If the strongest pole is
+    11 Hz in one window and 12 Hz in the next, the returned frequency
+    simply changes from 11 to 12 Hz.
 
     Parameters
     ----------
-    raw_signal : array-like
-        Raw LFP/EEG signal.
-
-    fs : float
-        Original sampling frequency.
-
-    target_fs : float, default=128
-        Sampling rate used for AR analysis.
-
-    ar_order : int, default=8
-        AR model order.
-
-    window_sec : float, default=1.0
-        AR window duration.
-
-    stride_samples : int, default=1
-        Number of target_fs samples between successive windows.
-
-        For the paper's original implementation:
-            stride_samples=1
-
-        This remains configurable.
-
     upper_threshold : float, default=0.92
-        Event onset threshold.
-
-        This remains configurable because your recording
-        devices/regions may require different thresholds.
+        R threshold for event onset.
 
     lower_threshold : float, default=0.90
-        Event continuation/splitting threshold.
+        R threshold for continuation.
 
-        Must normally be <= upper_threshold.
-
-    spindle_band : tuple, default=(10, 15)
-        Frequency range used for spindle detection.
-
-        This remains configurable.
-
-    min_duration_sec : float or None, default=0.4
-        Minimum event duration.
-
-        Set None to disable the lower duration bound.
-
-    max_duration_sec : float or None, default=3.5
-        Maximum event duration.
-
-        Set None to disable the upper duration bound.
-
-    n_jobs : int, default=1
-        Number of parallel jobs.
-
-    lowcut : float, default=0.1
-        High-pass cutoff.
-
-        This is now configurable without breaking existing calls.
-
-    highcut : float, default=100.0
-        Low-pass cutoff.
-
-        This is now configurable without breaking existing calls.
-
-    verbose : bool, default=False
-        Show AR-fitting progress.
-
-    max_frequency_jump_hz : float, default=3.0
-        Maximum frequency change between consecutive windows
-        when tracking an AR oscillatory pole.
-
-        This is an implementation choice because the paper does
-        not specify a pole identity-tracking threshold.
+    min_duration_sec, max_duration_sec : float or None
+        Optional duration filters. The paper does not specify these as
+        part of the AR threshold detector, so they default to None.
 
     Returns
     -------
-    final_events : np.ndarray
+    np.ndarray
         Shape (N, 6):
 
-            column 0 = start_time
-            column 1 = peak_time
-            column 2 = end_time
-            column 3 = duration
-            column 4 = max_r
-            column 5 = peak_frequency
-
-    Notes
-    -----
-    The public return format is deliberately unchanged from the
-    previous implementation.
-
-    Internally, however, all spindle-band AR poles are retained and
-    tracked separately before event detection.
+            0 = start_time
+            1 = peak_time
+            2 = end_time
+            3 = duration
+            4 = max_r
+            5 = peak_frequency
     """
     t_start = time.time()
 
@@ -1165,24 +1080,16 @@ def find_spindles_lfp(
         )
 
     if fs <= 0:
-        raise ValueError(
-            "fs must be positive."
-        )
+        raise ValueError("fs must be positive.")
 
     if target_fs <= 0:
-        raise ValueError(
-            "target_fs must be positive."
-        )
+        raise ValueError("target_fs must be positive.")
 
     if ar_order < 1:
-        raise ValueError(
-            "ar_order must be >= 1."
-        )
+        raise ValueError("ar_order must be >= 1.")
 
     if window_sec <= 0:
-        raise ValueError(
-            "window_sec must be > 0."
-        )
+        raise ValueError("window_sec must be > 0.")
 
     if stride_samples < 1:
         raise ValueError(
@@ -1207,9 +1114,7 @@ def find_spindles_lfp(
         )
 
     if lowcut <= 0:
-        raise ValueError(
-            "lowcut must be > 0."
-        )
+        raise ValueError("lowcut must be > 0.")
 
     if highcut <= lowcut:
         raise ValueError(
@@ -1240,9 +1145,7 @@ def find_spindles_lfp(
     )
 
     window_samples = int(
-        round(
-            window_sec * target_fs
-        )
+        round(window_sec * target_fs)
     )
 
     if window_samples <= ar_order:
@@ -1257,7 +1160,7 @@ def find_spindles_lfp(
         )
 
     # ------------------------------------------------------------------
-    # Window locations
+    # One independently evaluated AR window at every requested start.
     # ------------------------------------------------------------------
 
     total_windows = (
@@ -1272,45 +1175,31 @@ def find_spindles_lfp(
         stride_samples,
     )
 
-    # ------------------------------------------------------------------
-    # Fit all AR poles
-    # ------------------------------------------------------------------
-
-    frequencies_per_window, radii_per_window = (
-        _fit_all_pole_windows(
-            signal,
-            starts,
-            window_samples,
-            ar_order,
-            target_fs,
-            n_jobs,
-            verbose,
-        )
+    r_values, f_values = _fit_windows_at_starts(
+        signal,
+        starts,
+        window_samples,
+        ar_order,
+        target_fs,
+        spindle_band,
+        n_jobs,
+        verbose,
+        desc="AR fitting",
     )
 
-    if len(frequencies_per_window) == 0:
+    if len(r_values) == 0:
         return np.empty(
             (0, 6),
             dtype=float,
         )
 
     # ------------------------------------------------------------------
-    # Track individual spindle-frequency oscillators
+    # Hysteresis detection on the strongest-R-per-window series.
     # ------------------------------------------------------------------
 
-    tracks = _track_poles_by_frequency(
-        frequencies_per_window,
-        radii_per_window,
-        spindle_band=spindle_band,
-        max_frequency_jump_hz=max_frequency_jump_hz,
-    )
-
-    # ------------------------------------------------------------------
-    # Event detection
-    # ------------------------------------------------------------------
-
-    raw_events = _detect_events_from_tracks(
-        tracks,
+    raw_events = _detect_events_in_region(
+        r_values,
+        f_values,
         starts,
         target_fs,
         window_samples,
@@ -1319,7 +1208,7 @@ def find_spindles_lfp(
     )
 
     # ------------------------------------------------------------------
-    # Optional duration filtering
+    # Optional duration filtering.
     # ------------------------------------------------------------------
 
     final_events = filter_events_by_duration(
@@ -1329,12 +1218,11 @@ def find_spindles_lfp(
     )
 
     logging.info(
-        "Raw candidate events: %d -> "
-        "Filtered events: %d "
-        "(%.2fs)",
+        "Raw candidate events: %d -> Filtered events: %d (%.2fs)",
         len(raw_events),
         len(final_events),
         time.time() - t_start,
     )
 
     return final_events
+

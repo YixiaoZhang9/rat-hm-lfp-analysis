@@ -22,9 +22,9 @@ from task_loader import TaskLoader
 FS = 1000
 BUFFER_SEC = 1.0
 REGION_THRESHOLDS = {
-    "HPC": {"upper": 0.85, "lower": 0.40},
-    "PL":  {"upper": 0.85, "lower": 0.40},
-    "RSC": {"upper": 0.90, "lower": 0.40},
+    "HPC": {"upper": 0.85, "lower": 0.74},
+    "PL":  {"upper": 0.85, "lower": 0.72},
+    "RSC": {"upper": 0.90, "lower": 0.77},
 }
 STRIDE = 4
 BAND = (10, 15)
