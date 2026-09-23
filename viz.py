@@ -48,12 +48,9 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 import statsmodels.api as sm
-
 from PyQt5 import QtCore, QtGui, QtWidgets
-
 from scipy.io import loadmat
 from scipy.signal import butter, filtfilt
-
 
 # =====================================================================
 # Import preprocessing modules
@@ -79,13 +76,8 @@ _IMPORT_ERROR = ""
 
 try:
 
-    from modules.ephys_preprocessing import (
-        bandpass_filter as ar_bandpass_filter
-    )
-
-    from modules.ephys_preprocessing import (
-        downsampling as ar_downsampling
-    )
+    from modules.ephys_preprocessing import bandpass_filter as ar_bandpass_filter
+    from modules.ephys_preprocessing import downsampling as ar_downsampling
 
     MODULES_AVAILABLE = True
 
@@ -2587,10 +2579,7 @@ class SpindleViewer(
         self.lbl_ar_tracker.setText(
 
             f"AR: "
-            f"{max("
-                0,
-                self.current_ar_idx + 1
-            )}"
+            f"{max(0, self.current_ar_idx + 1)}"
             f" / "
             f"{len(self.current_ar_events)}"
 
