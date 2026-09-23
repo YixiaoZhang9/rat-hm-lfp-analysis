@@ -12,7 +12,11 @@ Important implementation notes
   it does not collapse each window to the single strongest pole.
 - No spindle-band filtering is used before the AR model.
 - Upper/lower hysteresis is used: rb starts an event; ra keeps a detection
-  continuous/merges nearby detections.
+  continuous/merges nearby detections. Per the paper, the event END time
+  (t2) is the last window still above rb, NOT the last window of the
+  ra<=r<rb trailing tail that is only used for continuity/merging.
+- Default thresholds are ra=0.90, rb=0.95, matching Olbrich & Achermann's
+  reported values exactly (not Blanco-Duque's oQ-bin threshold of 0.92).
 - The public interface of find_spindles_lfp() is unchanged.
 - fit_ar_on_prepared_signal() is retained for backward compatibility and
   continues to return the strongest spindle-band pole per window, because
@@ -393,37 +397,75 @@ def _match_candidates_to_tracks(
     max_frequency_jump_hz,
 ):
     """
-    Greedy nearest-frequency one-to-one matching.
+    Fast one-to-one frequency matching.
 
-    Each candidate is matched to at most one active track and vice versa.
-    Unmatched candidates start new tracks.
+    Candidates and active tracks are both sorted by frequency. We use a
+    two-pointer sweep, so matching is O(number_of_tracks + number_of_candidates)
+    rather than comparing every track with every candidate.
 
-    A track is a list of window observations:
-        (window_index, start_sample, frequency, R)
+    The papers do not prescribe a numerical pole-matching algorithm. This
+    matching is therefore an implementation detail used only to maintain
+    continuity of an oscillator between adjacent one-sample-shifted windows.
     """
-    if not tracks:
+    if not tracks or not candidates:
         return [], list(range(len(candidates)))
 
-    pairs = []
-
+    # Active tracks are represented by their most recent frequency.
+    track_items = []
     for track_id, track in enumerate(tracks):
-        if not track["observations"]:
+        if not track["active"] or not track["observations"]:
             continue
-
         last_f = track["observations"][-1][2]
+        if np.isfinite(last_f):
+            track_items.append((float(last_f), track_id))
 
-        for cand_id, (cand_f, _) in enumerate(candidates):
-            distance = abs(cand_f - last_f)
-            if distance <= max_frequency_jump_hz:
-                pairs.append((distance, track_id, cand_id))
+    cand_items = [
+        (float(f), i)
+        for i, (f, r) in enumerate(candidates)
+        if np.isfinite(f) and np.isfinite(r)
+    ]
 
-    pairs.sort(key=lambda x: x[0])
+    track_items.sort(key=lambda x: x[0])
+    cand_items.sort(key=lambda x: x[0])
+
+    # Generate only local candidate pairs. There are at most a few poles
+    # per AR(8) window, so this remains very small.
+    possible = []
+
+    for cand_f, cand_id in cand_items:
+        # Binary-search the first track frequency within the allowed range.
+        track_freqs = np.asarray(
+            [x[0] for x in track_items],
+            dtype=float,
+        )
+        left = np.searchsorted(
+            track_freqs,
+            cand_f - max_frequency_jump_hz,
+            side="left",
+        )
+        right = np.searchsorted(
+            track_freqs,
+            cand_f + max_frequency_jump_hz,
+            side="right",
+        )
+
+        for j in range(left, right):
+            track_f, track_id = track_items[j]
+            possible.append(
+                (
+                    abs(cand_f - track_f),
+                    track_id,
+                    cand_id,
+                )
+            )
+
+    possible.sort(key=lambda x: x[0])
 
     used_tracks = set()
     used_candidates = set()
     assignments = []
 
-    for distance, track_id, cand_id in pairs:
+    for distance, track_id, cand_id in possible:
         if track_id in used_tracks or cand_id in used_candidates:
             continue
 
@@ -445,6 +487,7 @@ def _match_candidates_to_tracks(
 
 def _finalize_track_event(
     observations,
+    last_high_sample_start,
     target_fs,
     window_samples,
     events,
@@ -460,9 +503,23 @@ def _finalize_track_event(
          max_r,
          peak_frequency]
 
-    The event start/end are based on the upper-threshold crossings.
-    Following Olbrich & Achermann, one window length is added to the
-    duration to account for the 1-s temporal resolution.
+    Paper definition (Olbrich & Achermann, Methods, Fig. 1):
+        t1 = time rb is crossed upward (event onset).
+        t2 = the LAST time rk fell below rb, before eventually falling
+             below ra for good. t2 is therefore anchored to the last
+             window that was still above the UPPER threshold, not to
+             the last window of the (lower-threshold-bounded) trajectory
+             used for continuity/merging.
+
+    `observations` holds every window in the trajectory, including any
+    trailing windows where ra <= r < rb (kept only to support
+    continuity/merging). `last_high_sample_start` is the sample index of
+    the last window in this trajectory where r > upper_threshold, and is
+    used for t2/end_time so we don't inflate event duration with the
+    sub-rb tail.
+
+    Following Olbrich & Achermann, one window length (td) is added to
+    the duration to account for the 1-s temporal resolution.
     """
     if not observations:
         return
@@ -508,8 +565,15 @@ def _finalize_track_event(
         + half_win
     )
 
+    # t2: last window still above the UPPER threshold (rb), per the
+    # paper -- NOT the last window of the trailing ra<=r<rb tail.
+    if last_high_sample_start is None:
+        # Should not normally happen: a track only becomes active once
+        # r > upper_threshold, so at least the onset window qualifies.
+        last_high_sample_start = starts[0]
+
     end_time = (
-        starts[-1] / target_fs
+        last_high_sample_start / target_fs
         + half_win
     )
 
@@ -551,17 +615,24 @@ def _detect_events_all_poles(
     lower_threshold,
     spindle_band,
     max_frequency_jump_hz=_DEFAULT_MAX_FREQUENCY_JUMP_HZ,
+    verbose=False,
 ):
     """
     Detect spindle events from ALL spindle-band AR poles.
 
     Logic:
       1. Every spindle-band pole is considered independently.
-      2. R > upper_threshold starts a detection.
+      2. R > upper_threshold starts a detection (t1).
       3. R >= lower_threshold keeps a pole trajectory continuous.
       4. The lower threshold therefore merges/splits nearby detections.
       5. Pole identity is maintained by nearest-frequency matching.
-      6. At event finalization, the maximum R and its frequency are reported.
+      6. Event end (t2) is the last window where R was still above
+         upper_threshold -- not the last window of the ra<=R<rb tail
+         used only for continuity. This matches the paper's Fig. 1
+         definition of t2 exactly.
+      7. At event finalization, the maximum R and its frequency are
+         reported (this is always attained at or before t2, since the
+         ra<=R<rb tail can, by construction, never exceed rb).
     """
     active_tracks = []
     completed_events = []
@@ -570,17 +641,26 @@ def _detect_events_all_poles(
         if track["active"]:
             _finalize_track_event(
                 track["observations"],
+                track["last_high_start"],
                 target_fs,
                 window_samples,
                 completed_events,
             )
 
-    for win_i, (freqs, radii) in enumerate(
-        zip(
-            frequencies_per_window,
-            radii_per_window,
+    window_iterator = zip(
+        frequencies_per_window,
+        radii_per_window,
+    )
+
+    if verbose:
+        window_iterator = tqdm(
+            window_iterator,
+            total=len(frequencies_per_window),
+            desc="Event extraction",
+            unit="win",
         )
-    ):
+
+    for win_i, (freqs, radii) in enumerate(window_iterator):
         candidates = _get_spindle_candidates(
             freqs,
             radii,
@@ -606,6 +686,7 @@ def _detect_events_all_poles(
                 finalize_track(track)
                 track["active"] = False
                 track["observations"] = []
+                track["last_high_start"] = None
                 continue
 
             # Once an event has started, R >= lower_threshold keeps it alive.
@@ -621,6 +702,7 @@ def _detect_events_all_poles(
                             r,
                         )
                     ]
+                    track["last_high_start"] = sample_starts[win_i]
             else:
                 track["observations"].append(
                     (
@@ -630,6 +712,10 @@ def _detect_events_all_poles(
                         r,
                     )
                 )
+                # Track t2 candidate: the most recent window still above
+                # the upper threshold (rb), per the paper's definition.
+                if r > upper_threshold:
+                    track["last_high_start"] = sample_starts[win_i]
 
             matched_track_ids.add(track_id)
 
@@ -640,14 +726,16 @@ def _detect_events_all_poles(
                 finalize_track(track)
                 track["active"] = False
                 track["observations"] = []
+                track["last_high_start"] = None
 
         # Start new tracks from unmatched candidates only when they cross rb.
         for cand_id in unmatched:
             f, r = candidates[cand_id]
 
+            is_high = r > upper_threshold
             active_tracks.append(
                 {
-                    "active": bool(r > upper_threshold),
+                    "active": bool(is_high),
                     "observations": (
                         [
                             (
@@ -657,8 +745,11 @@ def _detect_events_all_poles(
                                 r,
                             )
                         ]
-                        if r > upper_threshold
+                        if is_high
                         else []
+                    ),
+                    "last_high_start": (
+                        sample_starts[win_i] if is_high else None
                     ),
                 }
             )
@@ -749,7 +840,7 @@ def find_spindles_lfp(
     ar_order=8,
     window_sec=1.0,
     stride_samples=1,
-    upper_threshold=0.92,
+    upper_threshold=0.95,
     lower_threshold=0.90,
     spindle_band=(10, 15),
     min_duration_sec=None,
@@ -763,6 +854,13 @@ def find_spindles_lfp(
     Detect spindle-like events using the Olbrich/Blanco-Duque AR method.
 
     Public function signature is intentionally unchanged.
+
+    NOTE on defaults: upper_threshold/lower_threshold default to
+    rb=0.95 / ra=0.90, i.e. Olbrich & Achermann's own reported values
+    (Methods: "The thresholds for the detection of events were set to
+    ra = 0.9 and rb = 0.95"). If you want Blanco-Duque-style detection
+    (their oQ-quality bins start at r=0.92), pass
+    upper_threshold=0.92 explicitly; see classify_o_quality().
 
     Method
     ------
@@ -938,6 +1036,7 @@ def find_spindles_lfp(
         upper_threshold,
         lower_threshold,
         spindle_band,
+        verbose=verbose,
     )
 
     # ------------------------------------------------------------
