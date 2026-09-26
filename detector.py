@@ -46,7 +46,7 @@ def detect_events(signal, fs, r_a, r_b):
     print("Duration:", len(signal) / fs, "seconds")
 
     all_events = []
-    pole_trace = []
+    # pole_trace = []
     start = 0
 
     pbar = tqdm(total=len(signal) / fs, desc="Scanning")
@@ -120,17 +120,17 @@ def detect_events(signal, fs, r_a, r_b):
             )
 
 
-            # save pole information
-            for rank, osc in enumerate(oscillators):
-
-                pole_trace.append(
-                    {
-                        "time": time,
-                        "rank": rank,
-                        "r": osc["r"],
-                        "frequency": osc["frequency"],
-                    }
-                )
+#             # save pole information
+#             for rank, osc in enumerate(oscillators):
+#
+#                 pole_trace.append(
+#                     {
+#                         "time": time,
+#                         "rank": rank,
+#                         "r": osc["r"],
+#                         "frequency": osc["frequency"],
+#                     }
+#                 )
 
 
             # -----------------------------
@@ -264,9 +264,9 @@ def detect_events(signal, fs, r_a, r_b):
         last_progress = current_progress
 
     pbar.close()
-    pole_df = pd.DataFrame(pole_trace)
-    print(pole_df.head(20))
-    print(pole_df.describe())
+    # pole_df = pd.DataFrame(pole_trace)
+    # print(pole_df.head(20))
+    # print(pole_df.describe())
 
     return all_events
 
