@@ -39,8 +39,8 @@ from scipy.io import loadmat
 from tqdm import tqdm
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+from detector import get_oscillators
 from modules.ephys_preprocessing import bandpass_filter, downsampling
-from modules.find_spindles_lfp_o_quality import _fit_window
 from task_loader import TaskLoader
 
 # --------------------------------------------------------------------------- #
@@ -78,6 +78,28 @@ MAX_WORKERS = max(1, (os.cpu_count() or 2) - 1)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ar_calibration")
 
+def _fit_window_ar(segment, ar_order, target_fs, spindle_band):
+    """
+    Fit AR(ar_order) via Burg to a 1s segment (detector.get_oscillators)
+    and return the strongest pole whose frequency falls in spindle_band.
+
+    Returns (r_val, f_val). r_val = 0.0 when no pole is in-band, matching
+    the calling convention already assumed downstream (r_arr > 0 marks
+    "resolved"; r_val == 0.0 for all windows -> in_band_ratio == 0 -> NaN).
+    """
+    oscillators = get_oscillators(segment, p=ar_order, fs=target_fs)
+
+    low, high = spindle_band
+    in_band = [
+        osc for osc in oscillators
+        if low <= osc["frequency"] <= high
+    ]
+
+    if not in_band:
+        return 0.0, np.nan
+
+    best = max(in_band, key=lambda o: o["r"])
+    return best["r"], best["frequency"]
 
 # --------------------------------------------------------------------------- #
 # 1. Load Ground-Truth Wavelet Spindles
@@ -217,7 +239,7 @@ def analyze_spindle_r_dynamics(
         if w_start < 0 or w_end > len(signal_128):
             continue
 
-        r_val, f_val = _fit_window(signal_128[w_start:w_end], ar_order, target_fs, spindle_band)
+        r_val, f_val = _fit_window_ar(signal_128[w_start:w_end], ar_order, target_fs, spindle_band)
         r_series.append(r_val)
         f_series.append(f_val)
 
