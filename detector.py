@@ -49,7 +49,7 @@ def detect_events(signal, fs, r_a, r_b):
     # pole_trace = []
     start = 0
 
-    pbar = tqdm(total=len(signal) / fs, desc="Scanning")
+    # pbar = tqdm(total=len(signal) / fs, desc="Scanning")
     last_progress = 0
     while start < len(signal) - fs:
 
@@ -74,7 +74,7 @@ def detect_events(signal, fs, r_a, r_b):
         if not candidate_found:
 
             start += fs
-            pbar.update(1)
+            # pbar.update(1)
             continue
 
 
@@ -260,10 +260,10 @@ def detect_events(signal, fs, r_a, r_b):
 
 
         current_progress = start / fs
-        pbar.update(current_progress - last_progress)
+        # pbar.update(current_progress - last_progress)
         last_progress = current_progress
 
-    pbar.close()
+    # pbar.close()
     # pole_df = pd.DataFrame(pole_trace)
     # print(pole_df.head(20))
     # print(pole_df.describe())
