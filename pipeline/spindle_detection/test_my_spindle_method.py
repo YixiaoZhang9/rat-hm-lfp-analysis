@@ -29,8 +29,8 @@ from task_loader import TaskLoader
 FS = 1000
 TARGET_FS = 128
 
-RA = 0.80
-RB = 0.85
+RA = 0.75
+RB = 0.90
 
 SPINDLE_LOW = 11.5
 SPINDLE_HIGH = 16.0
