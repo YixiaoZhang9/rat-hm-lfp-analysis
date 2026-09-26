@@ -211,631 +211,635 @@ def get_nrem_intervals(scoring_path):
             ends
         )
     )
-    # ---------------------------------------------------------------------------
-    # Failure class
-    # ---------------------------------------------------------------------------
 
-    class TaskFailure(Exception):
 
-        def __init__(
-            self,
-            reason: str,
-            detail: str = ""
+# ---------------------------------------------------------------------------
+# Failure class
+# ---------------------------------------------------------------------------
+
+class TaskFailure(Exception):
+
+    def __init__(
+        self,
+        reason: str,
+        detail: str = ""
+    ):
+
+        self.reason = reason
+        self.detail = detail
+
+        super().__init__(
+            f"{reason}: {detail}"
+            if detail
+            else reason
+        )
+
+
+
+# ---------------------------------------------------------------------------
+# Extract spindles from one file
+# ---------------------------------------------------------------------------
+
+def extract_spindles_for_file(
+    task: Dict
+) -> pd.DataFrame:
+
+
+    data_path = task["data_path"]
+    scoring_path = task["scoring_path"]
+
+
+    if not os.path.exists(data_path):
+        raise TaskFailure(
+            "data file not found",
+            data_path
+        )
+
+
+    if not os.path.exists(scoring_path):
+        raise TaskFailure(
+            "scoring file not found",
+            scoring_path
+        )
+
+
+    # ------------------------------------------------------------
+    # Load LFP
+    # ------------------------------------------------------------
+
+    try:
+
+        raw_signal = loadmat(
+            data_path
+        )["data"].squeeze()
+
+    except Exception as e:
+
+        raise TaskFailure(
+            "data read error",
+            str(e)
+        )
+
+
+
+    # ------------------------------------------------------------
+    # Load NREM
+    # ------------------------------------------------------------
+
+    try:
+
+        nrem_intervals = get_nrem_intervals(
+            scoring_path
+        )
+
+    except Exception as e:
+
+        raise TaskFailure(
+            "scoring read error",
+            str(e)
+        )
+
+
+
+    if len(nrem_intervals) == 0:
+
+        raise TaskFailure(
+            "no NREM epochs"
+        )
+
+
+
+    all_spindles = []
+
+
+
+    # ------------------------------------------------------------
+    # Process every NREM block
+    # ------------------------------------------------------------
+
+    for start, end in nrem_intervals:
+
+
+        # NO BUFFER
+        start_sample = int(
+            start * FS
+        )
+
+        end_sample = int(
+            end * FS
+        )
+
+
+        segment = raw_signal[
+            start_sample:end_sample
+        ]
+
+
+        if len(segment) < FS:
+
+            continue
+
+
+
+        # --------------------------------------------------------
+        # 1000 Hz -> 128 Hz
+        # --------------------------------------------------------
+
+        segment = preprocess_signal(
+            segment
+        )
+
+
+
+        # --------------------------------------------------------
+        # Detect ALL AR events
+        # --------------------------------------------------------
+
+        events = detect_events(
+
+            signal=segment,
+
+            fs=TARGET_FS,
+
+            r_a=RA,
+
+            r_b=RB,
+        )
+
+
+
+        # --------------------------------------------------------
+        # Keep spindle frequency only
+        # --------------------------------------------------------
+
+        events = select_spindles(
+            events
+        )
+
+
+
+        spindles = convert_events_to_array(
+            events
+        )
+
+
+
+        if len(spindles) == 0:
+
+            continue
+
+
+
+        # --------------------------------------------------------
+        # Convert local NREM time -> global time
+        # --------------------------------------------------------
+
+        spindles[:,0:3] += (
+            start_sample / FS
+        )
+
+
+
+        # --------------------------------------------------------
+        # Keep strictly inside NREM
+        # --------------------------------------------------------
+
+        keep = (
+
+            (spindles[:,0] >= start)
+
+            &
+
+            (spindles[:,2] <= end)
+
+        )
+
+
+        valid = spindles[keep]
+
+
+        if len(valid) > 0:
+
+            all_spindles.append(
+                valid
+            )
+
+
+
+    # ------------------------------------------------------------
+    # No events
+    # ------------------------------------------------------------
+
+    if not all_spindles:
+
+        return pd.DataFrame()
+
+
+
+    final_spindles = np.vstack(
+        all_spindles
+    )
+
+
+
+    df = pd.DataFrame(
+
+        final_spindles,
+
+        columns=[
+
+            "Start_s",
+
+            "Peak_s",
+
+            "End_s",
+
+            "Duration_s",
+
+            "Max_R",
+
+            "Peak_Freq_Hz",
+
+        ]
+
+    )
+
+
+
+    # Metadata
+
+    df.insert(
+        0,
+        "File",
+        task["file_name"]
+    )
+
+    df.insert(
+        0,
+        "Date",
+        task["date"]
+    )
+
+    df.insert(
+        0,
+        "Region",
+        task["region"]
+    )
+
+    df.insert(
+        0,
+        "Rat",
+        task["rat"]
+    )
+
+    df.insert(
+        0,
+        "Cohort",
+        task["cohort"]
+    )
+
+
+    df["Threshold_RB"] = RB
+    df["Threshold_RA"] = RA
+
+
+    df["Spindle_Band_Low"] = SPINDLE_LOW
+    df["Spindle_Band_High"] = SPINDLE_HIGH
+
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Worker
+# ---------------------------------------------------------------------------
+
+def worker_process(
+    task: Dict
+) -> Dict:
+
+    t0 = time.time()
+
+    try:
+
+        df = extract_spindles_for_file(
+            task
+        )
+
+
+        return {
+
+            "status": "OK",
+
+            "task": task,
+
+            "df": df,
+
+            "elapsed": time.time() - t0,
+
+        }
+
+
+
+    except TaskFailure as e:
+
+
+        return {
+
+            "status": "SKIP",
+
+            "task": task,
+
+            "reason": e.reason,
+
+            "detail": e.detail,
+
+            "elapsed": time.time() - t0,
+
+        }
+
+
+
+    except Exception as e:
+
+
+        return {
+
+            "status": "ERROR",
+
+            "task": task,
+
+            "reason": "unexpected error",
+
+            "detail": str(e),
+
+            "elapsed": time.time() - t0,
+
+        }
+
+
+
+# ---------------------------------------------------------------------------
+# Main extraction
+# ---------------------------------------------------------------------------
+
+def run_extraction(
+    tasks: List[Dict]
+):
+
+
+    if not tasks:
+
+        logger.error(
+            "No tasks found"
+        )
+
+        return
+
+
+
+    logger.info(
+        f"Running {len(tasks)} files"
+    )
+
+
+
+    all_dfs = []
+
+    failures = []
+
+
+
+    pbar = tqdm(
+
+        total=len(tasks),
+
+        desc="Extracting spindles",
+
+        unit="file",
+
+        dynamic_ncols=True
+
+    )
+
+
+
+    with ProcessPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+
+        future_to_task = {
+
+
+            executor.submit(
+
+                worker_process,
+
+                task
+
+            ): task
+
+
+            for task in tasks
+
+        }
+
+
+
+        for i, future in enumerate(
+
+            as_completed(
+                future_to_task
+            ),
+
+            start=1
+
         ):
 
-            self.reason = reason
-            self.detail = detail
 
-            super().__init__(
-                f"{reason}: {detail}"
-                if detail
-                else reason
-            )
+            result = future.result()
 
 
+            task = result["task"]
 
-    # ---------------------------------------------------------------------------
-    # Extract spindles from one file
-    # ---------------------------------------------------------------------------
 
-    def extract_spindles_for_file(
-        task: Dict
-    ) -> pd.DataFrame:
+            pbar.set_postfix(
 
+                {
 
-        data_path = task["data_path"]
-        scoring_path = task["scoring_path"]
+                    "Rat": task["rat"],
 
+                    "Region": task["region"],
 
-        if not os.path.exists(data_path):
-            raise TaskFailure(
-                "data file not found",
-                data_path
-            )
+                    "Status": result["status"],
 
-
-        if not os.path.exists(scoring_path):
-            raise TaskFailure(
-                "scoring file not found",
-                scoring_path
-            )
-
-
-        # ------------------------------------------------------------
-        # Load LFP
-        # ------------------------------------------------------------
-
-        try:
-
-            raw_signal = loadmat(
-                data_path
-            )["data"].squeeze()
-
-        except Exception as e:
-
-            raise TaskFailure(
-                "data read error",
-                str(e)
-            )
-
-
-
-        # ------------------------------------------------------------
-        # Load NREM
-        # ------------------------------------------------------------
-
-        try:
-
-            nrem_intervals = get_nrem_intervals(
-                scoring_path
-            )
-
-        except Exception as e:
-
-            raise TaskFailure(
-                "scoring read error",
-                str(e)
-            )
-
-
-
-        if len(nrem_intervals) == 0:
-
-            raise TaskFailure(
-                "no NREM epochs"
-            )
-
-
-
-        all_spindles = []
-
-
-
-        # ------------------------------------------------------------
-        # Process every NREM block
-        # ------------------------------------------------------------
-
-        for start, end in nrem_intervals:
-
-
-            # NO BUFFER
-            start_sample = int(
-                start * FS
-            )
-
-            end_sample = int(
-                end * FS
-            )
-
-
-            segment = raw_signal[
-                start_sample:end_sample
-            ]
-
-
-            if len(segment) < FS:
-
-                continue
-
-
-
-            # --------------------------------------------------------
-            # 1000 Hz -> 128 Hz
-            # --------------------------------------------------------
-
-            segment = preprocess_signal(
-                segment
-            )
-
-
-
-            # --------------------------------------------------------
-            # Detect ALL AR events
-            # --------------------------------------------------------
-
-            events = detect_events(
-
-                signal=segment,
-
-                fs=TARGET_FS,
-
-                r_a=RA,
-
-                r_b=RB,
-            )
-
-
-
-            # --------------------------------------------------------
-            # Keep spindle frequency only
-            # --------------------------------------------------------
-
-            events = select_spindles(
-                events
-            )
-
-
-
-            spindles = convert_events_to_array(
-                events
-            )
-
-
-
-            if len(spindles) == 0:
-
-                continue
-
-
-
-            # --------------------------------------------------------
-            # Convert local NREM time -> global time
-            # --------------------------------------------------------
-
-            spindles[:,0:3] += (
-                start_sample / FS
-            )
-
-
-
-            # --------------------------------------------------------
-            # Keep strictly inside NREM
-            # --------------------------------------------------------
-
-            keep = (
-
-                (spindles[:,0] >= start)
-
-                &
-
-                (spindles[:,2] <= end)
+                }
 
             )
 
 
-            valid = spindles[keep]
+            pbar.update(1)
 
 
-            if len(valid) > 0:
 
-                all_spindles.append(
-                    valid
+            if result["status"] == "OK":
+
+
+                df = result["df"]
+
+
+                if not df.empty:
+
+                    all_dfs.append(
+                        df
+                    )
+
+
+
+                logger.info(
+
+                    f"{task['file_name']} -> "
+                    f"{len(df)} spindles"
+
                 )
 
 
 
-        # ------------------------------------------------------------
-        # No events
-        # ------------------------------------------------------------
-
-        if not all_spindles:
-
-            return pd.DataFrame()
+            else:
 
 
+                failures.append(
 
-        final_spindles = np.vstack(
-            all_spindles
-        )
+                    {
 
+                        **task,
 
+                        "reason": result.get(
+                            "reason",
+                            ""
+                        ),
 
-        df = pd.DataFrame(
+                        "detail": result.get(
+                            "detail",
+                            ""
+                        ),
 
-            final_spindles,
+                    }
 
-            columns=[
-
-                "Start_s",
-
-                "Peak_s",
-
-                "End_s",
-
-                "Duration_s",
-
-                "Max_R",
-
-                "Peak_Freq_Hz",
-
-            ]
-
-        )
-
-
-
-        # Metadata
-
-        df.insert(
-            0,
-            "File",
-            task["file_name"]
-        )
-
-        df.insert(
-            0,
-            "Date",
-            task["date"]
-        )
-
-        df.insert(
-            0,
-            "Region",
-            task["region"]
-        )
-
-        df.insert(
-            0,
-            "Rat",
-            task["rat"]
-        )
-
-        df.insert(
-            0,
-            "Cohort",
-            task["cohort"]
-        )
-
-
-        df["Threshold_RB"] = RB
-        df["Threshold_RA"] = RA
-
-
-        df["Spindle_Band_Low"] = SPINDLE_LOW
-        df["Spindle_Band_High"] = SPINDLE_HIGH
-
-
-        return df
-        # ---------------------------------------------------------------------------
-        # Worker
-        # ---------------------------------------------------------------------------
-
-        def worker_process(
-            task: Dict
-        ) -> Dict:
-
-            t0 = time.time()
-
-            try:
-
-                df = extract_spindles_for_file(
-                    task
                 )
 
 
-                return {
 
-                    "status": "OK",
+            # checkpoint
 
-                    "task": task,
+            if (
 
-                    "df": df,
+                i % CHECKPOINT_EVERY == 0
 
-                    "elapsed": time.time() - t0,
+                or i == len(tasks)
 
-                }
+            ):
 
 
+                if all_dfs:
 
-            except TaskFailure as e:
 
+                    pd.concat(
 
-                return {
+                        all_dfs,
 
-                    "status": "SKIP",
+                        ignore_index=True
 
-                    "task": task,
+                    ).to_csv(
 
-                    "reason": e.reason,
+                        SPINDLES_OUT_CSV,
 
-                    "detail": e.detail,
-
-                    "elapsed": time.time() - t0,
-
-                }
-
-
-
-            except Exception as e:
-
-
-                return {
-
-                    "status": "ERROR",
-
-                    "task": task,
-
-                    "reason": "unexpected error",
-
-                    "detail": str(e),
-
-                    "elapsed": time.time() - t0,
-
-                }
-
-
-
-        # ---------------------------------------------------------------------------
-        # Main extraction
-        # ---------------------------------------------------------------------------
-
-        def run_extraction(
-            tasks: List[Dict]
-        ):
-
-
-            if not tasks:
-
-                logger.error(
-                    "No tasks found"
-                )
-
-                return
-
-
-
-            logger.info(
-                f"Running {len(tasks)} files"
-            )
-
-
-
-            all_dfs = []
-
-            failures = []
-
-
-
-            pbar = tqdm(
-
-                total=len(tasks),
-
-                desc="Extracting spindles",
-
-                unit="file",
-
-                dynamic_ncols=True
-
-            )
-
-
-
-            with ProcessPoolExecutor(
-                max_workers=MAX_WORKERS
-            ) as executor:
-
-
-                future_to_task = {
-
-
-                    executor.submit(
-
-                        worker_process,
-
-                        task
-
-                    ): task
-
-
-                    for task in tasks
-
-                }
-
-
-
-                for i, future in enumerate(
-
-                    as_completed(
-                        future_to_task
-                    ),
-
-                    start=1
-
-                ):
-
-
-                    result = future.result()
-
-
-                    task = result["task"]
-
-
-                    pbar.set_postfix(
-
-                        {
-
-                            "Rat": task["rat"],
-
-                            "Region": task["region"],
-
-                            "Status": result["status"],
-
-                        }
+                        index=False
 
                     )
 
 
-                    pbar.update(1)
 
+                if failures:
 
 
-                    if result["status"] == "OK":
+                    pd.DataFrame(
+                        failures
+                    ).to_csv(
 
+                        FAILED_OUT_CSV,
 
-                        df = result["df"]
+                        index=False
 
+                    )
 
-                        if not df.empty:
 
-                            all_dfs.append(
-                                df
-                            )
 
+    pbar.close()
 
 
-                        logger.info(
 
-                            f"{task['file_name']} -> "
-                            f"{len(df)} spindles"
+    # ------------------------------------------------------------
+    # Final save
+    # ------------------------------------------------------------
 
-                        )
+    if not all_dfs:
 
 
+        logger.warning(
+            "No spindles detected"
+        )
 
-                    else:
+        return
 
 
-                        failures.append(
 
-                            {
+    master_df = pd.concat(
 
-                                **task,
+        all_dfs,
 
-                                "reason": result.get(
-                                    "reason",
-                                    ""
-                                ),
+        ignore_index=True
 
-                                "detail": result.get(
-                                    "detail",
-                                    ""
-                                ),
+    )
 
-                            }
 
-                        )
 
+    master_df.to_csv(
 
+        SPINDLES_OUT_CSV,
 
-                    # checkpoint
+        index=False
 
-                    if (
+    )
 
-                        i % CHECKPOINT_EVERY == 0
 
-                        or i == len(tasks)
 
-                    ):
+    logger.info(
 
+        f"Saved {len(master_df)} spindles"
 
-                        if all_dfs:
+    )
 
 
-                            pd.concat(
 
-                                all_dfs,
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
 
-                                ignore_index=True
+if __name__ == "__main__":
 
-                            ).to_csv(
 
-                                SPINDLES_OUT_CSV,
+    loader = TaskLoader(
 
-                                index=False
+        "/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/tasks_manifest.csv"
 
-                            )
+    )
 
 
+    tasks = loader.to_tasks()
 
-                        if failures:
 
-
-                            pd.DataFrame(
-                                failures
-                            ).to_csv(
-
-                                FAILED_OUT_CSV,
-
-                                index=False
-
-                            )
-
-
-
-            pbar.close()
-
-
-
-            # ------------------------------------------------------------
-            # Final save
-            # ------------------------------------------------------------
-
-            if not all_dfs:
-
-
-                logger.warning(
-                    "No spindles detected"
-                )
-
-                return
-
-
-
-            master_df = pd.concat(
-
-                all_dfs,
-
-                ignore_index=True
-
-            )
-
-
-
-            master_df.to_csv(
-
-                SPINDLES_OUT_CSV,
-
-                index=False
-
-            )
-
-
-
-            logger.info(
-
-                f"Saved {len(master_df)} spindles"
-
-            )
-
-
-
-        # ---------------------------------------------------------------------------
-        # Run
-        # ---------------------------------------------------------------------------
-
-        if __name__ == "__main__":
-
-
-            loader = TaskLoader(
-
-                "/home/mdadmin/Desktop/amirali/rat-hm-lfp-analysis/tasks_manifest.csv"
-
-            )
-
-
-            tasks = loader.to_tasks()
-
-
-            run_extraction(
-                tasks
-            )
+    run_extraction(
+        tasks
+    )
