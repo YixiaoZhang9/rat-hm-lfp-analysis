@@ -42,8 +42,8 @@ def get_oscillators(segment, p, fs):
 
 
 def detect_events(signal, fs, r_a, r_b):
-    print("Signal length:", len(signal))
-    print("Duration:", len(signal) / fs, "seconds")
+    # print("Signal length:", len(signal))
+    # print("Duration:", len(signal) / fs, "seconds")
 
     all_events = []
     # pole_trace = []
