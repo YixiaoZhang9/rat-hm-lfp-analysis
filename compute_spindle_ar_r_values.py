@@ -817,8 +817,8 @@ def main():
         raw_out,
     )
 
-    generate_fit_quality_report(analyzed_events)
-    generate_summary_tables(analyzed_events)
+    # generate_fit_quality_report(analyzed_events)
+    # generate_summary_tables(analyzed_events)
 
 
 if __name__ == "__main__":
