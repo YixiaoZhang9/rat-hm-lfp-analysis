@@ -53,14 +53,14 @@ ANALYSIS_ROOTS = [
 SUFFIX = Path("postsleep/wavelet_amp_1_ampcore_3")
 MANIFEST_PATH = "tasks_manifest.csv"
 
-FS = 1000               # Raw LFP rate
-TARGET_FS = 128         # Downsampled rate for AR fitting
+FS = 1000  # Raw LFP rate
+TARGET_FS = 128  # Downsampled rate for AR fitting
 AR_ORDER = 8
-SPINDLE_BAND = (10, 15)
+SPINDLE_BAND = (9, 20)
 AR_WINDOW_SEC = 1.0
 
-# Window stride in samples at TARGET_FS (2 samples = ~15.6 ms resolution)
-STRIDE_SAMPLES = 4
+# Evaluate the AR fit every 1/16 second (8 samples at 128 Hz).
+STRIDE_SAMPLES = TARGET_FS // 16
 
 # Minimum fraction of sliding windows within an event that must resolve an
 # in-band AR pole (r > 0) for that event's r_max/r_min/etc. to be trusted.
@@ -75,8 +75,11 @@ OUTPUT_DIR = Path("results_ar_calibration")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MAX_WORKERS = max(1, (os.cpu_count() or 2) - 1)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger("ar_calibration")
+
 
 def _fit_window_ar(segment, ar_order, target_fs, spindle_band):
     """
@@ -90,16 +93,14 @@ def _fit_window_ar(segment, ar_order, target_fs, spindle_band):
     oscillators = get_oscillators(segment, p=ar_order, fs=target_fs)
 
     low, high = spindle_band
-    in_band = [
-        osc for osc in oscillators
-        if low <= osc["frequency"] <= high
-    ]
+    in_band = [osc for osc in oscillators if low <= osc["frequency"] <= high]
 
     if not in_band:
         return 0.0, np.nan
 
     best = max(in_band, key=lambda o: o["r"])
     return best["r"], best["frequency"]
+
 
 # --------------------------------------------------------------------------- #
 # 1. Load Ground-Truth Wavelet Spindles
@@ -135,7 +136,9 @@ def load_all_spindle_events() -> pd.DataFrame:
                             df["date"] = date_dir.name
                             df["file"] = csv_file.name
                             df["channel"] = match.group(1) if match else None
-                            df["trial"] = match.group(2) if match and match.group(2) else ""
+                            df["trial"] = (
+                                match.group(2) if match and match.group(2) else ""
+                            )
 
                             df[START_COL] = df["spindle_start_index"] / FS
                             df[END_COL] = df["spindle_end_index"] / FS
@@ -147,7 +150,9 @@ def load_all_spindle_events() -> pd.DataFrame:
 
     events = pd.concat(rows, ignore_index=True)
     events["trial"] = events["trial"].fillna("")
-    logger.info(f"Loaded {len(events)} spindle events across {events['file'].nunique()} files.")
+    logger.info(
+        f"Loaded {len(events)} spindle events across {events['file'].nunique()} files."
+    )
     return events
 
 
@@ -164,7 +169,9 @@ def normalize_id(x) -> str:
 
 
 def parse_channel_and_trial(data_path: str) -> Tuple[str | None, str]:
-    match = re.match(r"chan(\d+)(?:_(\d+))?\.mat$", Path(str(data_path)).name, re.IGNORECASE)
+    match = re.match(
+        r"chan(\d+)(?:_(\d+))?\.mat$", Path(str(data_path)).name, re.IGNORECASE
+    )
     if not match:
         return None, ""
     return match.group(1), (match.group(2) or "")
@@ -188,8 +195,13 @@ def build_task_lookup() -> dict:
 
 
 def find_task(lookup: dict, rat_number, region, date, trial, channel):
-    key = (str(rat_number).strip(), str(region).strip(), str(date).strip(),
-           normalize_id(trial), normalize_id(channel))
+    key = (
+        str(rat_number).strip(),
+        str(region).strip(),
+        str(date).strip(),
+        normalize_id(trial),
+        normalize_id(channel),
+    )
     return lookup.get(key)
 
 
@@ -231,6 +243,7 @@ def analyze_spindle_r_dynamics(
     centers = np.arange(c_start, max(c_start + 1, c_end + 1), stride_samples)
     r_series = []
     f_series = []
+    evaluated_centers = []
 
     for c in centers:
         w_start = c - half_win
@@ -239,15 +252,24 @@ def analyze_spindle_r_dynamics(
         if w_start < 0 or w_end > len(signal_128):
             continue
 
-        r_val, f_val = _fit_window_ar(signal_128[w_start:w_end], ar_order, target_fs, spindle_band)
+        r_val, f_val = _fit_window_ar(
+            signal_128[w_start:w_end], ar_order, target_fs, spindle_band
+        )
         r_series.append(r_val)
         f_series.append(f_val)
+        evaluated_centers.append(c)
 
     if not r_series:
         return {
-            "r_max": np.nan, "r_min": np.nan, "r_mean": np.nan,
-            "r_start": np.nan, "r_end": np.nan, "r_peak_freq": np.nan,
-            "r_profile": [np.nan] * 11, "in_band_ratio": 0.0,
+            "r_max": np.nan,
+            "r_min": np.nan,
+            "r_mean": np.nan,
+            "r_start": np.nan,
+            "r_end": np.nan,
+            "r_peak_freq": np.nan,
+            "r_peak_time_s": np.nan,
+            "r_profile": [np.nan] * 11,
+            "in_band_ratio": 0.0,
             "n_windows": 0,
         }
 
@@ -265,9 +287,15 @@ def analyze_spindle_r_dynamics(
         # return NaN so it gets excluded from calibration stats via dropna,
         # instead of silently contributing a 0.0 that drags percentiles down.
         return {
-            "r_max": np.nan, "r_min": np.nan, "r_mean": np.nan,
-            "r_start": np.nan, "r_end": np.nan, "r_peak_freq": np.nan,
-            "r_profile": [np.nan] * 11, "in_band_ratio": in_band_ratio,
+            "r_max": np.nan,
+            "r_min": np.nan,
+            "r_mean": np.nan,
+            "r_start": np.nan,
+            "r_end": np.nan,
+            "r_peak_freq": np.nan,
+            "r_peak_time_s": np.nan,
+            "r_profile": [np.nan] * 11,
+            "in_band_ratio": in_band_ratio,
             "n_windows": n_windows,
         }
 
@@ -280,11 +308,14 @@ def analyze_spindle_r_dynamics(
     r_start = float(r_arr[0])
     r_end = float(r_arr[-1])
     r_peak_freq = float(f_arr[peak_idx])
+    r_peak_time_s = float(evaluated_centers[peak_idx] / target_fs)
 
     # Interpolate trajectory to 11 normalized timepoints (0%, 10%, ..., 100% of event)
     if len(r_arr) >= 2:
         x_norm = np.linspace(0, 1, len(r_arr))
-        interpolator = interp1d(x_norm, r_arr, kind="linear", bounds_error=False, fill_value="extrapolate")
+        interpolator = interp1d(
+            x_norm, r_arr, kind="linear", bounds_error=False, fill_value="extrapolate"
+        )
         profile = interpolator(np.linspace(0, 1, 11)).tolist()
     else:
         profile = [r_max] * 11
@@ -296,6 +327,7 @@ def analyze_spindle_r_dynamics(
         "r_start": r_start,
         "r_end": r_end,
         "r_peak_freq": r_peak_freq,
+        "r_peak_time_s": r_peak_time_s,
         "r_profile": profile,
         "in_band_ratio": in_band_ratio,
         "n_windows": n_windows,
@@ -317,7 +349,17 @@ def process_group(data_path: str, event_rows: List[Tuple]) -> List[Tuple]:
 # --------------------------------------------------------------------------- #
 def compute_all_dynamics(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
     events = events.copy()
-    for col in ["r_max", "r_min", "r_mean", "r_start", "r_end", "r_peak_freq", "in_band_ratio", "n_windows"]:
+    for col in [
+        "r_max",
+        "r_min",
+        "r_mean",
+        "r_start",
+        "r_end",
+        "r_peak_freq",
+        "r_peak_time_s",
+        "in_band_ratio",
+        "n_windows",
+    ]:
         events[col] = np.nan
 
     profile_cols = [f"r_profile_{p}%" for p in range(0, 101, 10)]
@@ -331,13 +373,25 @@ def compute_all_dynamics(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
     for (rat_number, region, date, trial, channel), group in events.groupby(group_cols):
         task = find_task(lookup, rat_number, region, date, trial, channel)
         if task is None:
-            unmatched.append({"rat": rat_number, "region": region, "date": date, "trial": trial, "chan": channel,
-                               "n_events": len(group)})
+            unmatched.append(
+                {
+                    "rat": rat_number,
+                    "region": region,
+                    "date": date,
+                    "trial": trial,
+                    "chan": channel,
+                    "n_events": len(group),
+                }
+            )
             continue
-        jobs[task["data_path"]] = list(zip(group.index, group[START_COL], group[END_COL]))
+        jobs[task["data_path"]] = list(
+            zip(group.index, group[START_COL], group[END_COL])
+        )
 
     if unmatched:
-        unmatched_df = pd.DataFrame(unmatched).drop_duplicates(subset=["rat", "region", "date", "trial", "chan"])
+        unmatched_df = pd.DataFrame(unmatched).drop_duplicates(
+            subset=["rat", "region", "date", "trial", "chan"]
+        )
         unmatched_df.to_csv(OUTPUT_DIR / "unmatched_manifest.csv", index=False)
         total_unmatched_events = unmatched_df["n_events"].sum()
         logger.warning(
@@ -345,14 +399,25 @@ def compute_all_dynamics(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
         )
         # Flag if unmatched groups are concentrated in one region - this can
         # masquerade as a "low R" region if it's actually a lookup/key mismatch.
-        by_region = unmatched_df.groupby("region")["n_events"].sum().sort_values(ascending=False)
+        by_region = (
+            unmatched_df.groupby("region")["n_events"]
+            .sum()
+            .sort_values(ascending=False)
+        )
         logger.warning(f"Unmatched events by region:\n{by_region.to_string()}")
 
-    logger.info(f"Analyzing {len(events)} events across {len(jobs)} files using {MAX_WORKERS} workers...")
+    logger.info(
+        f"Analyzing {len(events)} events across {len(jobs)} files using {MAX_WORKERS} workers..."
+    )
 
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_group, path, rows): path for path, rows in jobs.items()}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Fitting AR Trajectories"):
+        futures = {
+            executor.submit(process_group, path, rows): path
+            for path, rows in jobs.items()
+        }
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Fitting AR Trajectories"
+        ):
             try:
                 for idx, metrics in future.result():
                     events.at[idx, "r_max"] = metrics["r_max"]
@@ -361,6 +426,7 @@ def compute_all_dynamics(events: pd.DataFrame, lookup: dict) -> pd.DataFrame:
                     events.at[idx, "r_start"] = metrics["r_start"]
                     events.at[idx, "r_end"] = metrics["r_end"]
                     events.at[idx, "r_peak_freq"] = metrics["r_peak_freq"]
+                    events.at[idx, "r_peak_time_s"] = metrics["r_peak_time_s"]
                     events.at[idx, "in_band_ratio"] = metrics["in_band_ratio"]
                     events.at[idx, "n_windows"] = metrics["n_windows"]
                     for col_name, val in zip(profile_cols, metrics["r_profile"]):
@@ -384,7 +450,9 @@ def generate_fit_quality_report(df: pd.DataFrame):
     """
     has_metrics = df.dropna(subset=["in_band_ratio"]).copy()
     if has_metrics.empty:
-        logger.error("No events had AR metrics computed at all (fit stage produced nothing).")
+        logger.error(
+            "No events had AR metrics computed at all (fit stage produced nothing)."
+        )
         return
 
     records = []
@@ -392,13 +460,17 @@ def generate_fit_quality_report(df: pd.DataFrame):
         n = len(reg_df)
         n_total_fail = int((reg_df["in_band_ratio"] == 0).sum())
         n_below_gate = int((reg_df["in_band_ratio"] < MIN_IN_BAND_RATIO).sum())
-        records.append({
-            "Region": region,
-            "N_Events": n,
-            "Mean_In_Band_Ratio": round(float(reg_df["in_band_ratio"].mean()), 3),
-            "Pct_Complete_Fit_Failure (ratio==0)": round(100 * n_total_fail / n, 2),
-            f"Pct_Below_Gate (<{MIN_IN_BAND_RATIO})": round(100 * n_below_gate / n, 2),
-        })
+        records.append(
+            {
+                "Region": region,
+                "N_Events": n,
+                "Mean_In_Band_Ratio": round(float(reg_df["in_band_ratio"].mean()), 3),
+                "Pct_Complete_Fit_Failure (ratio==0)": round(100 * n_total_fail / n, 2),
+                f"Pct_Below_Gate (<{MIN_IN_BAND_RATIO})": round(
+                    100 * n_below_gate / n, 2
+                ),
+            }
+        )
 
     report = pd.DataFrame(records)
     report.to_csv(OUTPUT_DIR / "fit_quality_report.csv", index=False)
@@ -438,23 +510,15 @@ def generate_summary_tables(df: pd.DataFrame):
     This lets the actual distributions be inspected before the final
     hysteresis pair is chosen.
     """
-    valid = df.dropna(
-        subset=["r_max", "r_min"]
-    ).copy()
+    valid = df.dropna(subset=["r_max", "r_min"]).copy()
 
-    valid = valid[
-        valid["in_band_ratio"] >= MIN_IN_BAND_RATIO
-    ].copy()
+    valid = valid[valid["in_band_ratio"] >= MIN_IN_BAND_RATIO].copy()
 
     if valid.empty:
-        logger.error(
-            "No valid AR events processed after quality filtering."
-        )
+        logger.error("No valid AR events processed after quality filtering.")
         return
 
-    n_fitted = int(
-        df["r_max"].notna().sum()
-    )
+    n_fitted = int(df["r_max"].notna().sum())
 
     logger.info(
         "Calibration will use %d events "
@@ -482,15 +546,11 @@ def generate_summary_tables(df: pd.DataFrame):
 
     records = []
 
-    for region, reg_df in valid.groupby(
-        "region"
-    ):
+    for region, reg_df in valid.groupby("region"):
         row = {
             "Region": region,
             "N_Spindles": len(reg_df),
-            "N_Rats": reg_df[
-                "rat_number"
-            ].nunique(),
+            "N_Rats": reg_df["rat_number"].nunique(),
         }
 
         for metric in [
@@ -500,26 +560,14 @@ def generate_summary_tables(df: pd.DataFrame):
             "r_start",
             "r_end",
         ]:
-            vals = reg_df[
-                metric
-            ].values
+            vals = reg_df[metric].values
 
-            row[
-                f"{metric}_mean"
-            ] = float(
-                np.mean(vals)
-            )
+            row[f"{metric}_mean"] = float(np.mean(vals))
 
-            row[
-                f"{metric}_std"
-            ] = float(
-                np.std(vals)
-            )
+            row[f"{metric}_std"] = float(np.std(vals))
 
             for q in quantiles:
-                row[
-                    f"{metric}_p{int(q * 100)}"
-                ] = float(
+                row[f"{metric}_p{int(q * 100)}"] = float(
                     np.quantile(
                         vals,
                         q,
@@ -528,13 +576,10 @@ def generate_summary_tables(df: pd.DataFrame):
 
         records.append(row)
 
-    pooled_summary = pd.DataFrame(
-        records
-    )
+    pooled_summary = pd.DataFrame(records)
 
     pooled_summary.to_csv(
-        OUTPUT_DIR
-        / "regional_ar_pooled_summary.csv",
+        OUTPUT_DIR / "regional_ar_pooled_summary.csv",
         index=False,
     )
 
@@ -542,8 +587,7 @@ def generate_summary_tables(df: pd.DataFrame):
     # B. Rat-averaged summary
     # ------------------------------------------------------------------ #
     rat_means = (
-        valid
-        .groupby(
+        valid.groupby(
             [
                 "region",
                 "rat_number",
@@ -561,8 +605,7 @@ def generate_summary_tables(df: pd.DataFrame):
     )
 
     rat_agg = (
-        rat_means
-        .groupby("region")[
+        rat_means.groupby("region")[
             [
                 "r_max",
                 "r_min",
@@ -579,16 +622,10 @@ def generate_summary_tables(df: pd.DataFrame):
         .reset_index()
     )
 
-    rat_agg.columns = [
-        "_".join(
-            filter(None, c)
-        )
-        for c in rat_agg.columns
-    ]
+    rat_agg.columns = ["_".join(filter(None, c)) for c in rat_agg.columns]
 
     rat_agg.to_csv(
-        OUTPUT_DIR
-        / "regional_ar_rat_averaged_summary.csv",
+        OUTPUT_DIR / "regional_ar_rat_averaged_summary.csv",
         index=False,
     )
 
@@ -610,14 +647,10 @@ def generate_summary_tables(df: pd.DataFrame):
     #
     calib = []
 
-    for region, reg_df in valid.groupby(
-        "region"
-    ):
+    for region, reg_df in valid.groupby("region"):
         row = {
             "Region": region,
-            "N_Spindles_Used": len(
-                reg_df
-            ),
+            "N_Spindles_Used": len(reg_df),
         }
 
         for q in [
@@ -628,9 +661,7 @@ def generate_summary_tables(df: pd.DataFrame):
             0.25,
             0.50,
         ]:
-            row[
-                f"Upper_Rmax_p{int(q * 100)}"
-            ] = round(
+            row[f"Upper_Rmax_p{int(q * 100)}"] = round(
                 float(
                     np.quantile(
                         reg_df["r_max"],
@@ -654,9 +685,7 @@ def generate_summary_tables(df: pd.DataFrame):
                 0.50,
                 0.75,
             ]:
-                row[
-                    f"{metric}_p{int(q * 100)}"
-                ] = round(
+                row[f"{metric}_p{int(q * 100)}"] = round(
                     float(
                         np.quantile(
                             reg_df[metric],
@@ -668,39 +697,25 @@ def generate_summary_tables(df: pd.DataFrame):
 
         calib.append(row)
 
-    calib_df = pd.DataFrame(
-        calib
-    )
+    calib_df = pd.DataFrame(calib)
 
     # Keep the old filename so downstream code does not break, but the
     # contents are now explicitly empirical candidates rather than a
     # hard-coded recommendation.
     calib_df.to_csv(
-        OUTPUT_DIR
-        / "recommended_hysteresis_thresholds.csv",
+        OUTPUT_DIR / "recommended_hysteresis_thresholds.csv",
         index=False,
     )
 
     # ------------------------------------------------------------------ #
     # D. Mean temporal R evolution
     # ------------------------------------------------------------------ #
-    profile_cols = [
-        f"r_profile_{p}%"
-        for p in range(0, 101, 10)
-    ]
+    profile_cols = [f"r_profile_{p}%" for p in range(0, 101, 10)]
 
-    evolution = (
-        valid
-        .groupby("region")[
-            profile_cols
-        ]
-        .mean()
-        .reset_index()
-    )
+    evolution = valid.groupby("region")[profile_cols].mean().reset_index()
 
     evolution.to_csv(
-        OUTPUT_DIR
-        / "regional_r_evolution_profile.csv",
+        OUTPUT_DIR / "regional_r_evolution_profile.csv",
         index=False,
     )
 
@@ -708,8 +723,7 @@ def generate_summary_tables(df: pd.DataFrame):
     # E. Compact dynamics summary
     # ------------------------------------------------------------------ #
     dynamics_summary = (
-        valid
-        .groupby("region")[
+        valid.groupby("region")[
             [
                 "r_mean",
                 "r_start",
@@ -728,15 +742,11 @@ def generate_summary_tables(df: pd.DataFrame):
     )
 
     dynamics_summary.columns = [
-        "_".join(
-            filter(None, c)
-        )
-        for c in dynamics_summary.columns
+        "_".join(filter(None, c)) for c in dynamics_summary.columns
     ]
 
     dynamics_summary.to_csv(
-        OUTPUT_DIR
-        / "regional_ar_dynamics_summary.csv",
+        OUTPUT_DIR / "regional_ar_dynamics_summary.csv",
         index=False,
     )
 
@@ -744,37 +754,19 @@ def generate_summary_tables(df: pd.DataFrame):
     # Console
     # ------------------------------------------------------------------ #
     print("\n" + "=" * 80)
-    print(
-        "EMPIRICAL HYSTERESIS THRESHOLD CANDIDATES"
-    )
+    print("EMPIRICAL HYSTERESIS THRESHOLD CANDIDATES")
     print("=" * 80)
-    print(
-        calib_df.to_string(
-            index=False
-        )
-    )
+    print(calib_df.to_string(index=False))
 
     print("\n" + "=" * 80)
-    print(
-        "MEAN R EVOLUTION ACROSS SPINDLE DURATION"
-    )
+    print("MEAN R EVOLUTION ACROSS SPINDLE DURATION")
     print("=" * 80)
-    print(
-        evolution.to_string(
-            index=False
-        )
-    )
+    print(evolution.to_string(index=False))
 
     print("\n" + "=" * 80)
-    print(
-        "DYNAMICS SUMMARY"
-    )
+    print("DYNAMICS SUMMARY")
     print("=" * 80)
-    print(
-        dynamics_summary.to_string(
-            index=False
-        )
-    )
+    print(dynamics_summary.to_string(index=False))
     print()
 
 
@@ -792,7 +784,8 @@ def main():
     # Compact event-level calibration table. No raw R(t) arrays are saved,
     # so this file stays small enough to inspect/upload.
     event_cols = [
-        c for c in [
+        c
+        for c in [
             "region",
             "rat_number",
             "date",
@@ -807,6 +800,7 @@ def main():
             "r_start",
             "r_end",
             "r_peak_freq",
+            "r_peak_time_s",
             "in_band_ratio",
             "n_windows",
         ]
