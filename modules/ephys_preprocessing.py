@@ -2,13 +2,12 @@
 
 import os
 import re
+from fractions import Fraction
 
 import matplotlib
 import numpy as np
 from scipy.interpolate import CubicSpline, interp1d
-from scipy.signal import butter, filtfilt, freqz, hilbert, resample,resample_poly
-from fractions import Fraction
-
+from scipy.signal import butter, filtfilt, freqz, hilbert, resample, resample_poly
 
 matplotlib.use("Qt5Agg")
 import glob
