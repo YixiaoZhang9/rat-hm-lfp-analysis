@@ -1,46 +1,36 @@
 """Save random wavelet-spindle examples grouped by rat and OQ range.
 
-For each rat:
-    - Select 20 random spindle events from each OQ range.
-    - Extract the corresponding raw LFP.
-    - Save one waveform plot per event.
+For each rat, pick random spindle events from each OQ range, extract the
+matching raw LFP, and save one waveform plot per event.
 
-OQ = r_max from wavelet-detected spindle events.
+OQ = r_max from the wavelet-detected spindle events.
 """
 
 import re
 from pathlib import Path
 
 import matplotlib
+
+matplotlib.use("Agg")  # must be set before importing pyplot
+
 import matplotlib.pyplot as plt
-
-matplotlib.use("Agg")
-
 import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent
+RESULTS_DIR = ROOT / "results_ar_calibration"
 
-RESULTS_CSV = (
-    ROOT
-    / "results_ar_calibration"
-    / "wavelet_spindles_ar_calibration.csv"
-)
-
+RESULTS_CSV = RESULTS_DIR / "wavelet_spindles_ar_calibration.csv"
 MANIFEST_CSV = ROOT / "tasks_manifest.csv"
-
-OUTPUT_DIR = (
-    ROOT
-    / "results_ar_calibration"
-    / "oq_analysis"
-)
+OUTPUT_DIR = RESULTS_DIR / "oq_analysis"
 
 SAMPLES_PER_RAT_RANGE = 20
 RANDOM_SEED = 42
+FS = 1000  # Hz
+PLOT_PADDING_SEC = 0.5
 
-# OQ ranges used in the notebook.
 OQ_RANGES = [
     (0.70, 0.75),
     (0.75, 0.80),
@@ -49,14 +39,24 @@ OQ_RANGES = [
     (0.90, 0.95),
 ]
 
-FS = 1000
-PLOT_PADDING_SEC = 0.5
+REQUIRED_COLUMNS = {
+    "rat_number",
+    "region",
+    "date",
+    "channel",
+    "trial",
+    "r_max",
+    "spindle_start_time_s",
+    "spindle_end_time_s",
+}
+
+FILENAME_PATTERN = re.compile(r"chan(\d+)(?:_(\d+))?\.mat$", re.IGNORECASE)
 
 
 def normalize_id(value):
+    """Turn 3, 3.0, '3' -> '3'; NaN/empty -> ''."""
     if pd.isna(value) or str(value).strip() in ("", "nan"):
         return ""
-
     try:
         return str(int(float(value)))
     except (TypeError, ValueError):
@@ -73,304 +73,119 @@ def task_key(rat, region, date, trial, channel):
     )
 
 
-def recording_lookup(manifest_path):
-    """Build lookup from spindle identifiers to raw MAT recordings."""
-
+def build_recording_lookup(manifest_path):
+    """Map (rat, region, date, trial, channel) -> raw MAT file path."""
     if not manifest_path.exists():
-        raise FileNotFoundError(
-            f"Manifest not found: {manifest_path}"
-        )
-
-    tasks = pd.read_csv(manifest_path)
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
 
     lookup = {}
-
-    for _, row in tasks.iterrows():
-
-        match = re.match(
-            r"chan(\d+)(?:_(\d+))?\.mat$",
-            Path(str(row["data_path"])).name,
-            re.IGNORECASE,
-        )
-
+    for row in pd.read_csv(manifest_path).itertuples(index=False):
+        data_path = Path(str(row.data_path))
+        match = FILENAME_PATTERN.match(data_path.name)
         if not match:
             continue
-
-        channel = match.group(1)
-        trial = match.group(2) or ""
-
-        key = task_key(
-            row["rat"],
-            row["region"],
-            row["date"],
-            trial,
-            channel,
-        )
-
-        lookup[key] = Path(str(row["data_path"]))
-
+        channel, trial = match.group(1), match.group(2) or ""
+        lookup[task_key(row.rat, row.region, row.date, trial, channel)] = data_path
     return lookup
 
 
-def plot_event(row, signal, output_path):
-    """Plot and save one spindle waveform."""
+def load_signal(path, cache):
+    """Load the 'data' array from a MAT file, caching by path."""
+    if path not in cache:
+        cache[path] = np.asarray(loadmat(path)["data"]).squeeze()
+    return cache[path]
 
-    start = int(
-        round(
-            float(row["spindle_start_time_s"]) * FS
-        )
-    )
 
-    end = int(
-        round(
-            float(row["spindle_end_time_s"]) * FS
-        )
-    )
-
+def plot_event(row, oq, oq_range_label, signal, output_path):
+    """Plot one spindle with padding; return False if the window is empty."""
+    start = int(round(row["spindle_start_time_s"] * FS))
+    end = int(round(row["spindle_end_time_s"] * FS))
     padding = int(PLOT_PADDING_SEC * FS)
 
     left = max(0, start - padding)
     right = min(len(signal), end + padding)
-
     if right <= left:
         return False
 
-    times = np.arange(left, right) / FS
-
     fig, ax = plt.subplots(figsize=(9, 3))
-
-    ax.plot(
-        times,
-        signal[left:right],
-        linewidth=0.7,
-        color="black",
-    )
-
-    ax.axvspan(
-        start / FS,
-        end / FS,
-        color="tab:orange",
-        alpha=0.25,
-        label="Wavelet spindle",
-    )
-
-    oq = float(row["r_max"])
-
+    ax.plot(np.arange(left, right) / FS, signal[left:right], lw=0.7, color="black")
+    ax.axvspan(start / FS, end / FS, color="tab:orange", alpha=0.25,
+               label="Wavelet spindle")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("LFP")
-
-    ax.set_title(
-        f"Rat {int(row['rat_number'])} | "
-        f"OQ = {oq:.3f} | "
-        f"{row['oq_range']}"
-    )
-
+    ax.set_title(f"Rat {int(row['rat_number'])} | OQ = {oq:.3f} | {oq_range_label}")
     ax.legend(loc="upper right")
-
     fig.tight_layout()
-    fig.savefig(
-        output_path,
-        dpi=150,
-        bbox_inches="tight",
-    )
-
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-
     return True
 
 
-def main():
+def load_events(csv_path):
+    """Read the spindle CSV and keep rows with a usable OQ and timing."""
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Event results CSV not found: {csv_path}")
 
-    if not RESULTS_CSV.exists():
-        raise FileNotFoundError(
-            f"Event results CSV not found: {RESULTS_CSV}"
-        )
-
-    df = pd.read_csv(RESULTS_CSV)
-
-    required = {
-        "rat_number",
-        "region",
-        "date",
-        "channel",
-        "trial",
-        "r_max",
-        "spindle_start_time_s",
-        "spindle_end_time_s",
-    }
-
-    missing = required.difference(df.columns)
-
+    df = pd.read_csv(csv_path)
+    missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
-        raise ValueError(
-            f"Results CSV is missing required columns: {sorted(missing)}"
-        )
+        raise ValueError(f"Results CSV is missing columns: {sorted(missing)}")
 
-    # ---------------------------------------------------------
-    # Prepare OQ
-    # ---------------------------------------------------------
-
-    df["oq"] = pd.to_numeric(
-        df["r_max"],
-        errors="coerce",
-    )
-
-    valid = df.dropna(
-        subset=[
-            "oq",
-            "spindle_start_time_s",
-            "spindle_end_time_s",
-        ]
+    df["oq"] = pd.to_numeric(df["r_max"], errors="coerce")
+    return df.dropna(
+        subset=["oq", "spindle_start_time_s", "spindle_end_time_s"]
     ).copy()
 
-    # ---------------------------------------------------------
-    # Build recording lookup
-    # ---------------------------------------------------------
 
-    lookup = recording_lookup(MANIFEST_CSV)
-
-    # Cache recordings so the same MAT file is not loaded repeatedly.
+def main():
+    events = load_events(RESULTS_CSV)
+    lookup = build_recording_lookup(MANIFEST_CSV)
     signal_cache = {}
 
-    total_expected = (
-        valid["rat_number"].nunique()
-        * len(OQ_RANGES)
-        * SAMPLES_PER_RAT_RANGE
-    )
-
+    rats = sorted(events["rat_number"].unique())
+    total_expected = len(rats) * len(OQ_RANGES) * SAMPLES_PER_RAT_RANGE
     total_saved = 0
     total_missing = 0
 
-    # ---------------------------------------------------------
-    # Select and save samples
-    # ---------------------------------------------------------
-
-    for rat in tqdm(
-        sorted(valid["rat_number"].unique()),
-        desc="Processing rats",
-    ):
-
-        rat_df = valid[
-            valid["rat_number"] == rat
-        ].copy()
-
-        rat_dir = OUTPUT_DIR / f"rat_{int(rat):02d}"
+    for rat in tqdm(rats, desc="Processing rats"):
+        rat_events = events[events["rat_number"] == rat]
 
         for low, high in OQ_RANGES:
+            label = f"{low:.2f}-{high:.2f}"
+            in_range = rat_events[(rat_events["oq"] >= low) & (rat_events["oq"] < high)]
 
-            range_df = rat_df[
-                (rat_df["oq"] >= low)
-                & (rat_df["oq"] < high)
-            ].copy()
-
-            oq_label = f"{low:.2f}_{high:.2f}"
-
-            output_dir = (
-                rat_dir
-                / f"oq_{oq_label}"
-            )
-
-            output_dir.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            if len(range_df) < SAMPLES_PER_RAT_RANGE:
-
-                print(
-                    f"Rat {int(rat)} | "
-                    f"{low:.2f}-{high:.2f}: "
-                    f"only {len(range_df)} events available "
-                    f"(need {SAMPLES_PER_RAT_RANGE})"
-                )
-
+            if len(in_range) < SAMPLES_PER_RAT_RANGE:
+                print(f"Rat {int(rat)} | {label}: only {len(in_range)} events "
+                      f"available (need {SAMPLES_PER_RAT_RANGE})")
                 continue
 
-            # Reproducible random selection.
-            samples = range_df.sample(
-                n=SAMPLES_PER_RAT_RANGE,
-                random_state=RANDOM_SEED,
-            )
+            samples = in_range.sample(n=SAMPLES_PER_RAT_RANGE, random_state=RANDOM_SEED)
+            out_dir = OUTPUT_DIR / f"rat_{int(rat):02d}" / f"oq_{low:.2f}_{high:.2f}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Rat {int(rat)} | OQ {label}: saving {len(samples)} plots")
 
-            print(
-                f"Rat {int(rat)} | "
-                f"OQ {low:.2f}-{high:.2f}: "
-                f"saving {len(samples)} plots"
-            )
-
-            for sample_number, (_, row) in enumerate(
-                samples.iterrows(),
-                start=1,
-            ):
-
-                key = task_key(
-                    row["rat_number"],
-                    row["region"],
-                    row["date"],
-                    row["trial"],
-                    row["channel"],
-                )
-
+            for n, (_, row) in enumerate(samples.iterrows(), start=1):
+                key = task_key(row["rat_number"], row["region"], row["date"],
+                               row["trial"], row["channel"])
                 data_path = lookup.get(key)
-
                 if data_path is None:
-                    print(
-                        f"  Recording not found: {key}"
-                    )
+                    print(f"  Recording not found: {key}")
                     total_missing += 1
                     continue
 
-                # Load and cache recording.
-                data_path_str = str(data_path)
-
-                if data_path_str not in signal_cache:
-
-                    try:
-                        signal_cache[data_path_str] = np.asarray(
-                            loadmat(data_path)["data"]
-                        ).squeeze()
-
-                    except Exception as exc:
-                        print(
-                            f"  Could not load {data_path}: {exc}"
-                        )
-                        total_missing += 1
-                        continue
-
-                signal = signal_cache[data_path_str]
-
-                safe_date = str(row["date"])
+                try:
+                    signal = load_signal(str(data_path), signal_cache)
+                except Exception as exc:
+                    print(f"  Could not load {data_path}: {exc}")
+                    total_missing += 1
+                    continue
 
                 oq = float(row["oq"])
-
-                output_path = (
-                    output_dir
-                    / (
-                        f"sample_{sample_number:02d}"
-                        f"_oq_{oq:.3f}"
-                        f"_date_{safe_date}"
-                        f".png"
-                    )
-                )
-
-                row = row.copy()
-                row["oq_range"] = (
-                    f"{low:.2f}-{high:.2f}"
-                )
-
-                saved = plot_event(
-                    row,
-                    signal,
-                    output_path,
-                )
-
-                if saved:
+                out_path = out_dir / f"sample_{n:02d}_oq_{oq:.3f}_date_{row['date']}.png"
+                if plot_event(row, oq, label, signal, out_path):
                     total_saved += 1
 
-    print()
-    print("=" * 60)
-    print("DONE")
-    print("=" * 60)
+    print(f"\n{'=' * 60}\nDONE\n{'=' * 60}")
     print(f"Expected plots: {total_expected}")
     print(f"Saved plots:    {total_saved}")
     print(f"Missing plots:  {total_missing}")
