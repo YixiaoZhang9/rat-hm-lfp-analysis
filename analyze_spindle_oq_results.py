@@ -11,11 +11,15 @@ OQ = r_max from wavelet-detected spindle events.
 import re
 from pathlib import Path
 
+import matplotlib
 import matplotlib.pyplot as plt
+
+matplotlib.use("Agg")
+
 import numpy as np
 import pandas as pd
 from scipy.io import loadmat
-from tqdm.gui import tqdm
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent
 
