@@ -28,3 +28,7 @@ trained_networks/
 *.h5
 *.pkl
 *.pth
+
+# Local generated outputs (README: results/ is not committed)
+results/*
+!results/README.md

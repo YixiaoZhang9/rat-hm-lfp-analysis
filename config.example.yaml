@@ -13,3 +13,11 @@ paths:
 
   # Local training-data folder used when preparing ripple model training data.
   ripple_training_data: /path/to/ripple_detection/training_data
+
+  # Event-coupling notebooks (notebooks/leticia_event_coupling):
+  # folder with the cached event tables (delta/, ripple/, spindle/, gl_sessions.pkl)
+  event_cache_root: /path/to/wave_cache
+
+  # Session map and HC / Training day grid for rats 1-16
+  session_map_csv: /path/to/rat_sessions_HC_S1-5.csv
+  day_grid_xlsx: /path/to/Rats_1-16__HC_vs_Training_days__.xlsx
