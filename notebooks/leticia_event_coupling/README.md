@@ -28,7 +28,7 @@ because those rats have ripples.
 All over-time parts drop rat-days with less than 10 min of NREM (`MIN_NREM_MIN = 10`)
 and list the removed days in red under each plot.
 
-## Setup
+## Setupa
 
 1. Install the repo requirements (`pip install -r requirements.txt`).
 2. Copy `config.example.yaml` to `config.yaml` and set these keys:
